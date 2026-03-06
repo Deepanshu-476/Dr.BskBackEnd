@@ -190,6 +190,9 @@ const clientIp = (
 // Add this with your other routes
 const couponRoutes = require('./routes/couponRoutes');
 
+
+app.use('/api', require('./routes/paymentSettings'));
+
 // Use routes - यहाँ सभी routes को mount करें
 app.use('/admin', adminRoutes);
 app.use('/user', usersRoutes);
@@ -489,5 +492,6 @@ app.use((req, res) => {
     message: 'Route not found' 
   });
 });
+
 
 module.exports = app;
