@@ -9,7 +9,7 @@ const PORT = process.env.PORT || 4000;
 const server = app.listen(PORT, () => {
   console.log(`\n🚀 Server is running on port ${PORT}`);
   console.log(`📍 http://localhost:${PORT}`);
-  console.log(`📁 Uploads folder: ${__dirname}/uploads`);
+  console.log(`📁 Uploads folder: ${__dirname}/uploads`); 
   console.log(`🌐 CORS enabled for http://localhost:3000\n`);
 });
 
