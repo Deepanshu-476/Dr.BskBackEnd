@@ -71,27 +71,55 @@ exports.getAllProductsXML = async (req, res) => {
       .populate("sub_category");
 
     const data = {
-      product: products.map(p => ({
-        id: p._id.toString(),
-        name: p.name || "",
-        price: p.price || 0,
-        category: p.category || "",
-        subCategory: p.sub_category || "",
-        media: (p.media || []).map(m => {
-        let mediaUrl = m?.url || "";
+  product: products.map(p => ({
+    id: p._id.toString(),
+    name: p.name || "",
+    description: p.description || "",
 
-        // agar already full URL nahi hai to domain add karo
-        if (mediaUrl && !mediaUrl.startsWith("http")) {
-          mediaUrl = BASE_URL + mediaUrl;
-        }
+    // 🔥 PRICE SECTION (IMPORTANT)
+    price: p.consumer_price || p.retail_price || p.mrp || 0,
+    consumer_price: p.consumer_price || "",
+    retail_price: p.retail_price || "",
+    mrp: p.mrp || "",
+    discount: p.discount || "",
 
-        return {
-          url: mediaUrl,
-          type: m?.type || ""
-        };
-      })
-      }))
-    };
+    // 🔥 CATEGORY
+    category: p.category || "",
+    subCategory: p.sub_category || "",
+
+    // 🔥 EXTRA DETAILS
+    productvariety: p.productvariety || "",
+    prescription: p.prescription || "",
+    expires_on: p.expires_on || "",
+    benefits: p.benefits || "",
+    dosage: p.dosage || "",
+    side_effects: p.side_effects || "",
+
+    // 🔥 STOCK
+    stock: p.stock || "",
+    quantity: p.quantity || "",
+    gst: p.gst || "",
+    suitable_for: p.suitable_for || "",
+
+    // 🔥 MEDIA
+    media: (p.media || []).map(m => {
+      let mediaUrl = m?.url || "";
+
+      if (mediaUrl && !mediaUrl.startsWith("http")) {
+        mediaUrl = BASE_URL + mediaUrl;
+      }
+
+      return {
+        url: mediaUrl,
+        type: m?.type || ""
+      };
+    }),
+
+    // 🔥 DATES
+    createdAt: p.createdAt || "",
+    updatedAt: p.updatedAt || ""
+  }))
+};
 
     const xml = js2xmlparser.parse("products", data);
 
