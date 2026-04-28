@@ -30,9 +30,19 @@ exports.createProduct = async (req, res) => {
       size: file.size
     }));
 
+    let slug = slugify(req.body.name);
+
+// duplicate slug fix
+    const existing = await Product.findOne({ slug });
+    if (existing) {
+      slug = slug + "-" + Date.now();
+    }
+
     const productData = {
       ...req.body,
-      media: mediaFiles
+      slug,
+      media: mediaFiles,
+      quantity: req.body.quantity ? JSON.parse(req.body.quantity) : [] // ✅ FIX
     };
 
     const product = new Product(productData);
@@ -45,7 +55,14 @@ exports.createProduct = async (req, res) => {
     res.status(400).json({ message: error.message });
   }
 };
-
+const slugify = (text) => {
+  return text
+    .toLowerCase()
+    .trim()
+    .replace(/[()]/g, "")
+    .replace(/[^a-z0-9]+/g, "-")
+    .replace(/^-+|-+$/g, "");
+};
 
 // Get all products
 exports.getAllProducts = async (req, res) => {
@@ -62,7 +79,15 @@ exports.getAllProducts = async (req, res) => {
   }
 };
 
-const js2xmlparser = require("js2xmlparser");
+const escapeXML = (str = "") => {
+  return str
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+};
+
 
 exports.getAllProductsXML = async (req, res) => {
   try {
@@ -70,61 +95,66 @@ exports.getAllProductsXML = async (req, res) => {
       .populate("category")
       .populate("sub_category");
 
-    const data = {
-  product: products.map(p => ({
-    id: p._id.toString(),
-    name: p.name || "",
-    description: p.description || "",
+let xml = `<?xml version="1.0" encoding="UTF-8"?>
+<rss xmlns:g="http://base.google.com/ns/1.0" version="2.0">
+<channel>
+<title>DR BSK Healthcare</title>
+<link>https://drbskhealthcare.com/</link>
+<description>Product Feed</description>
+`;
 
-    // 🔥 PRICE SECTION (IMPORTANT)
-    price: p.consumer_price || p.retail_price || p.mrp || 0,
-    consumer_price: p.consumer_price || "",
-    retail_price: p.retail_price || "",
-    mrp: p.mrp || "",
-    discount: p.discount || "",
+products.forEach(p => {
 
-    // 🔥 CATEGORY
-    category: p.category || "",
-    subCategory: p.sub_category || "",
+  let image = p.media?.[0]?.url || `${BASE_URL}/default.jpg`;
+  image = encodeURI(image);
+  if (image && !image.startsWith("http")) {
+    image = BASE_URL + image;
+  }
 
-    // 🔥 EXTRA DETAILS
-    productvariety: p.productvariety || "",
-    prescription: p.prescription || "",
-    expires_on: p.expires_on || "",
-    benefits: p.benefits || "",
-    dosage: p.dosage || "",
-    side_effects: p.side_effects || "",
+xml += `
+<item>
+  <g:id>${p._id}</g:id>
+  <g:mpn>${p._id}</g:mpn>
 
-    // 🔥 STOCK
-    stock: p.stock || "",
-    quantity: p.quantity || "",
-    gst: p.gst || "",
-    suitable_for: p.suitable_for || "",
+  <g:title><![CDATA[${(p.name || "").trim()}]]></g:title>
 
-    // 🔥 MEDIA
-    media: (p.media || []).map(m => {
-      let mediaUrl = m?.url || "";
+  <g:description><![CDATA[${(p.description || "").trim().replace(/\s+/g, " ")}]]></g:description>
 
-      if (mediaUrl && !mediaUrl.startsWith("http")) {
-        mediaUrl = BASE_URL + mediaUrl;
-      }
+  <g:link>${BASE_URL}/product/${p.slug || p._id}</g:link>
 
-      return {
-        url: mediaUrl,
-        type: m?.type || ""
-      };
-    }),
+  <g:image_link>${image}</g:image_link>
 
-    // 🔥 DATES
-    createdAt: p.createdAt || "",
-    updatedAt: p.updatedAt || ""
-  }))
-};
+  <g:availability>${(p.stock === "yes" || p.stock === true) ? "in stock" : "out of stock"}</g:availability>
 
-    const xml = js2xmlparser.parse("products", data);
+  <g:price>${Number(p.consumer_price || p.retail_price || p.mrp || 0).toFixed(2)} INR</g:price>
 
-    res.set("Content-Type", "application/xml");
-    res.send(xml);
+    <g:shipping>
+      <g:country>IN</g:country>
+      <g:service>Standard</g:service>
+      <g:price>0 INR</g:price>
+    </g:shipping>
+  
+  <g:brand>BSK</g:brand>
+
+  <g:condition>new</g:condition>
+
+  <g:identifier_exists>no</g:identifier_exists>
+
+  <g:product_type>${escapeXML((p.category?.name || "Animal Feed Supplement").trim())}</g:product_type>
+
+  <g:google_product_category>Animals &amp; Pet Supplies &gt; Livestock Supplies</g:google_product_category>
+
+</item>
+`;
+});
+
+xml += `
+</channel>
+</rss>
+`;
+
+res.set("Content-Type", "application/xml");
+res.send(xml);
 
   } catch (error) {
     console.error("XML ERROR:", error);
@@ -154,11 +184,18 @@ exports.updateProduct = async (req, res) => {
   try {
     logger.info(`Request to update product ${req.params.id} with data: ${JSON.stringify(req.body)}`);
 
+    let slug = slugify(req.body.name);
+
     const updatedProduct = await Product.findByIdAndUpdate(
       req.params.id,
-      { ...req.body, updatedAt: Date.now() },
+      {
+        ...req.body,
+        slug,
+        quantity: req.body.quantity ? JSON.parse(req.body.quantity) : [],
+        updatedAt: Date.now()
+      }, // ✅ ADD slug
       { new: true, runValidators: true }
-    );
+    );  
 
     if (!updatedProduct) {
       logger.warn(`Product not found for update: ${req.params.id}`);
@@ -311,3 +348,17 @@ exports.searchProducts = async (req, res) => {
   }
 };
 
+exports.getProductBySlug = async (req, res) => {
+  try {
+    const product = await Product.findOne({ slug: req.params.slug });
+
+    if (!product) {
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    res.status(200).json(product);  
+  } catch (error) {
+    console.error("GET PRODUCT BY SLUG ERROR:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
