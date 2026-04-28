@@ -1,6 +1,6 @@
 const Product = require("../models/product");
 const { logger } = require("../utils/logger");
-
+const BASE_URL = "https://drbskhealthcare.com";
 
 const multer = require("multer");
 const path = require("path");
@@ -77,10 +77,19 @@ exports.getAllProductsXML = async (req, res) => {
         price: p.price || 0,
         category: p.category || "",
         subCategory: p.sub_category || "",
-        media: (p.media || []).map(m => ({
-          url: m?.url || "",
+        media: (p.media || []).map(m => {
+        let mediaUrl = m?.url || "";
+
+        // agar already full URL nahi hai to domain add karo
+        if (mediaUrl && !mediaUrl.startsWith("http")) {
+          mediaUrl = BASE_URL + mediaUrl;
+        }
+
+        return {
+          url: mediaUrl,
           type: m?.type || ""
-        }))
+        };
+      })
       }))
     };
 
