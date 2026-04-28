@@ -12,6 +12,7 @@ const tokenRequired = require("../middlewares/authMiddlewares");
 const upload = require("../middlewares/uploadMiddleware");
 
 router.post('/createProduct', productController.upload.array('media', 10), productController.createProduct);
+router.get("/products/xml", productController.getAllProductsXML);
 router.get("/allproducts", productController.getAllProducts);
 router.get("/product/:id", productController.getProductById);
 router.put("/updateProduct/:id",productController.upload.array('media', 10), productController.updateProduct);

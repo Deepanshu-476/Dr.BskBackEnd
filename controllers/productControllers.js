@@ -62,6 +62,39 @@ exports.getAllProducts = async (req, res) => {
   }
 };
 
+const js2xmlparser = require("js2xmlparser");
+
+exports.getAllProductsXML = async (req, res) => {
+  try {
+    const products = await Product.find({ deleted_at: null })
+      .populate("category")
+      .populate("sub_category");
+
+    const data = {
+      product: products.map(p => ({
+        id: p._id.toString(),
+        name: p.name || "",
+        price: p.price || 0,
+        category: p.category || "",
+        subCategory: p.sub_category || "",
+        media: (p.media || []).map(m => ({
+          url: m?.url || "",
+          type: m?.type || ""
+        }))
+      }))
+    };
+
+    const xml = js2xmlparser.parse("products", data);
+
+    res.set("Content-Type", "application/xml");
+    res.send(xml);
+
+  } catch (error) {
+    console.error("XML ERROR:", error);
+    res.status(500).send(error.message);
+  }
+};
+
 // Get a single product by ID
 exports.getProductById = async (req, res) => {
   try {
