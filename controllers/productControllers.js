@@ -67,9 +67,10 @@ const slugify = (text) => {
 // Get all products
 exports.getAllProducts = async (req, res) => {
   try {
-    const products = await Product.find({ deleted_at: null })
-      .populate("category")
-      .populate("sub_category");
+    const products = await Product.find({
+        deleted_at: null,
+        category: { $ne: null }
+      });
 
     logger.info(`Fetched ${products.length} products`);
     res.status(200).json(products);
@@ -91,9 +92,12 @@ const escapeXML = (str = "") => {
 
 exports.getAllProductsXML = async (req, res) => {
   try {
-    const products = await Product.find({ deleted_at: null })
-      .populate("category")
-      .populate("sub_category");
+   const products = await Product.find({
+      deleted_at: null,
+      category: { $ne: null }   // ✅ ye add karo
+    })
+    .populate("category")
+    .populate("sub_category");
 
 let xml = `<?xml version="1.0" encoding="UTF-8"?>
 <rss xmlns:g="http://base.google.com/ns/1.0" version="2.0">
@@ -104,6 +108,49 @@ let xml = `<?xml version="1.0" encoding="UTF-8"?>
 `;
 
 products.forEach(p => {
+
+
+let variants = [];
+
+try {
+  if (Array.isArray(p.quantity)) {
+    variants = p.quantity;
+  } else if (typeof p.quantity === "string") {
+    variants = JSON.parse(p.quantity);
+  }
+} catch {
+  variants = [];
+}
+
+let variantPrice = null;
+
+for (let v of variants) {
+  if (
+    v?.final_price ||
+    v?.retail_price ||
+    v?.price ||
+    v?.selling_price ||
+    v?.discount_price
+  ) {
+    variantPrice =
+      v.final_price ||
+      v.retail_price ||
+      v.price ||
+      v.selling_price ||
+      v.discount_price;
+
+    break;
+  }
+}
+
+  const price = Number(
+  variantPrice ||
+  p.final_price ||
+  p.consumer_price ||
+  p.retail_price ||
+  p.mrp ||
+  0
+).toFixed(2);
 
   let image = p.media?.[0]?.url || `${BASE_URL}/default.jpg`;
   image = encodeURI(image);
@@ -120,18 +167,18 @@ xml += `
 
   <g:description><![CDATA[${(p.description || "").trim().replace(/\s+/g, " ")}]]></g:description>
 
-  <g:link>${BASE_URL}/product/${p.slug || p._id}</g:link>
+  <g:link>${BASE_URL}/#/ProductPage/${p.slug || p._id}</g:link>
 
   <g:image_link>${image}</g:image_link>
 
   <g:availability>${(p.stock === "yes" || p.stock === true) ? "in stock" : "out of stock"}</g:availability>
 
-  <g:price>${Number(p.consumer_price || p.retail_price || p.mrp || 0).toFixed(2)} INR</g:price>
+  <g:price>${price} INR</g:price>
 
     <g:shipping>
       <g:country>IN</g:country>
       <g:service>Standard</g:service>
-      <g:price>0 INR</g:price>
+     <g:price>${price} INR</g:price>
     </g:shipping>
   
   <g:brand>BSK</g:brand>
@@ -140,9 +187,11 @@ xml += `
 
   <g:identifier_exists>no</g:identifier_exists>
 
-  <g:product_type>${escapeXML((p.category?.name || "Animal Feed Supplement").trim())}</g:product_type>
+  <g:product_type>${escapeXML((p.category || "").trim())}</g:product_type>
 
-  <g:google_product_category>Animals &amp; Pet Supplies &gt; Livestock Supplies</g:google_product_category>
+  <g:google_product_category>
+      ${escapeXML((p.category || "Health & Beauty").trim())}
+    </g:google_product_category>
 
 </item>
 `;
