@@ -108,9 +108,10 @@ const orderSchema = new mongoose.Schema({
     amount: { type: Number, min: 0 },
     status: {
       type: String,
-      enum: ['pending', 'created', 'authorized', 'captured', 'failed', 'refunded'],
+      enum: ['pending', 'created', 'authorized', 'captured', 'failed', 'refunded', 'cod'],
       default: 'created'
     },
+    displayStatus: { type: String, default: null }, // ✅ ADD THIS LINE - For frontend display
     method: { type: String, default: null },
     capturedAt: { type: Date },
     failedAt: { type: Date },
@@ -185,9 +186,15 @@ orderSchema.index({ orderId: 1 });
 
 // Virtual for payment status display
 orderSchema.virtual('paymentStatusDisplay').get(function () {
+  // Check if displayStatus is set (from admin manual update)
+  if (this.paymentInfo?.displayStatus) {
+    return this.paymentInfo.displayStatus;
+  }
+  
   const status = this.paymentInfo?.status || 'created';
   switch (status) {
     case 'captured': return 'Paid';
+    case 'cod': return 'COD';
     case 'authorized': return 'Authorized (Pending Capture)';
     case 'failed': return 'Payment Failed';
     case 'pending': return 'Payment Pending';
@@ -235,6 +242,25 @@ orderSchema.virtual('userType').get(function () {
   return 'Registered';
 });
 
+// Virtual to get payment status for frontend
+orderSchema.virtual('frontendPaymentStatus').get(function () {
+  if (this.paymentMethod === 'cod') {
+    return 'COD';
+  }
+  
+  if (this.paymentInfo?.displayStatus) {
+    return this.paymentInfo.displayStatus;
+  }
+  
+  const status = this.paymentInfo?.status;
+  if (status === 'captured') return 'Paid';
+  if (status === 'pending') return 'Pending';
+  if (status === 'authorized') return 'Authorized';
+  if (status === 'failed') return 'Failed';
+  
+  return 'Pending';
+});
+
 // Pre-save validation and status management
 orderSchema.pre('save', function (next) {
   // Auto-detect guest user
@@ -260,6 +286,14 @@ orderSchema.pre('save', function (next) {
       this.codCharge = this.totalAmount - itemsTotal;
     }
     
+    // Set paymentInfo displayStatus for COD
+    if (this.paymentInfo && !this.paymentInfo.displayStatus) {
+      this.paymentInfo.displayStatus = 'COD';
+    }
+    if (this.paymentInfo && (!this.paymentInfo.status || this.paymentInfo.status === 'created')) {
+      this.paymentInfo.status = 'cod';
+    }
+    
     const expectedTotal = itemsTotal + (this.codCharge || 0);
     
     // Log for debugging
@@ -281,6 +315,19 @@ orderSchema.pre('save', function (next) {
     // For non-COD orders, validate strictly
     if (Math.abs(this.totalAmount - itemsTotal) > 0.01) {
       return next(new Error(`Total amount mismatch: expected ${itemsTotal}, got ${this.totalAmount}`));
+    }
+    
+    // Set paymentInfo displayStatus for online orders
+    if (this.paymentInfo && !this.paymentInfo.displayStatus) {
+      if (this.paymentInfo.status === 'captured') {
+        this.paymentInfo.displayStatus = 'Paid';
+      } else if (this.paymentInfo.status === 'pending') {
+        this.paymentInfo.displayStatus = 'Pending';
+      } else if (this.paymentInfo.status === 'authorized') {
+        this.paymentInfo.displayStatus = 'Authorized';
+      } else if (this.paymentInfo.status === 'failed') {
+        this.paymentInfo.displayStatus = 'Failed';
+      }
     }
   }
 
@@ -309,8 +356,13 @@ orderSchema.pre('save', function (next) {
       if (this.status === 'Pending') {
         this.status = 'Confirmed';
       }
+      // Set displayStatus
+      this.paymentInfo.displayStatus = 'Paid';
     } else if (paymentStatus === 'failed' && !this.paymentInfo.failedAt) {
       this.paymentInfo.failedAt = now;
+      this.paymentInfo.displayStatus = 'Failed';
+    } else if (paymentStatus === 'cod') {
+      this.paymentInfo.displayStatus = 'COD';
     }
     this.paymentInfo.updatedAt = now;
   }
@@ -416,6 +468,7 @@ orderSchema.methods.getSummary = function () {
     totalAmount: this.totalAmount,
     status: this.status,
     paymentStatus: this.paymentInfo.status,
+    paymentDisplayStatus: this.frontendPaymentStatus,
     paymentMethod: this.paymentMethod,
     itemsCount: this.items.length,
     createdAt: this.createdAt,

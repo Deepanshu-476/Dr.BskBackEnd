@@ -401,6 +401,154 @@ router.get('/monthly-order-totals', async (req, res) => {
   }
 });
 
+// ==================== UPDATE PAYMENT STATUS API ====================
+router.put('/orders/:orderId/payment-status', async (req, res) => {
+  const { orderId } = req.params;
+  const { paymentStatus, displayStatus } = req.body;
+
+  console.log("=== UPDATE PAYMENT STATUS ===");
+  console.log("Order ID:", orderId);
+  console.log("Payment Status:", paymentStatus);
+
+  try {
+    const order = await Order.findById(orderId);
+    
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found"
+      });
+    }
+
+    // Map frontend status to backend status
+    let backendStatus = paymentStatus;
+    let actualDisplayStatus = displayStatus || paymentStatus;
+    
+    if (paymentStatus === 'Paid') {
+      backendStatus = 'captured';
+    } else if (paymentStatus === 'COD') {
+      backendStatus = 'cod';
+      actualDisplayStatus = 'COD';
+    } else if (paymentStatus === 'Pending') {
+      backendStatus = 'pending';
+    }
+
+    // Initialize paymentInfo if not exists
+    if (!order.paymentInfo) {
+      order.paymentInfo = {};
+    }
+
+    // Update payment info
+    order.paymentInfo.status = backendStatus;
+    order.paymentInfo.displayStatus = actualDisplayStatus;
+    order.paymentInfo.updatedAt = new Date();
+    
+    // Set payment method for COD
+    if (actualDisplayStatus === 'COD' || paymentStatus === 'COD') {
+      order.paymentMethod = 'cod';
+    }
+
+    // If payment status is set to 'captured' (Paid), update order status to Confirmed
+    if (backendStatus === 'captured' && order.status === 'Pending') {
+      order.status = 'Confirmed';
+      console.log("Order status updated to Confirmed");
+    }
+
+    await order.save();
+
+    console.log("✅ Payment status updated successfully");
+
+    res.status(200).json({
+      success: true,
+      message: "Payment status updated successfully",
+      paymentInfo: order.paymentInfo
+    });
+
+  } catch (error) {
+    console.error("❌ Error updating payment status:", error);
+    res.status(500).json({
+      success: false,
+      message: "Failed to update payment status",
+      error: error.message
+    });
+  }
+});
+
+// ==================== CAPTURE PAYMENT API ====================
+router.post('/capturePayment/:orderId', async (req, res) => {
+  const { orderId } = req.params;
+
+  console.log("=== CAPTURE PAYMENT ===");
+  console.log("Order ID:", orderId);
+
+  try {
+    const order = await Order.findById(orderId);
+    
+    if (!order) {
+      return res.status(404).json({
+        success: false,
+        message: "Order not found"
+      });
+    }
+
+    // Check if payment needs capture
+    if (order.paymentInfo?.status !== 'authorized') {
+      return res.status(400).json({
+        success: false,
+        message: `Payment cannot be captured. Current status: ${order.paymentInfo?.status || 'unknown'}`
+      });
+    }
+
+    const paymentId = order.paymentInfo.paymentId;
+    
+    if (!paymentId) {
+      return res.status(400).json({
+        success: false,
+        message: "No payment ID found for this order"
+      });
+    }
+
+    console.log("Capturing payment:", paymentId);
+    
+    const capturedPayment = await razorpayInstance.payments.capture(
+      paymentId,
+      Math.round(order.totalAmount * 100),
+      { currency: "INR" }
+    );
+
+    console.log("Payment captured:", capturedPayment.id);
+
+    // Update order payment info
+    order.paymentInfo.status = 'captured';
+    order.paymentInfo.displayStatus = 'Paid';
+    order.paymentInfo.capturedAt = new Date();
+    order.paymentInfo.updatedAt = new Date();
+    
+    // Update order status
+    if (order.status === 'Pending') {
+      order.status = 'Confirmed';
+    }
+
+    await order.save();
+
+    res.status(200).json({
+      success: true,
+      message: "Payment captured successfully",
+      paymentInfo: order.paymentInfo
+    });
+
+  } catch (error) {
+    console.error("❌ Error capturing payment:", error);
+    
+    res.status(500).json({
+      success: false,
+      message: "Failed to capture payment",
+      error: error.message
+    });
+  }
+});
+
+
 // OPTIONAL: Get yearly summary
 router.get('/yearly-summary', async (req, res) => {
   console.log("=== FETCHING YEARLY SUMMARY ===");

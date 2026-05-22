@@ -307,7 +307,6 @@ exports.updateProduct = async (req, res) => {
 };
 
 
-
 // Soft delete a product
 exports.deleteProduct = async (req, res) => {
   try {
