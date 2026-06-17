@@ -12,12 +12,22 @@ const prescriptionController = require("../controllers/prescriptionController");
 const tokenRequired = require("../middlewares/authMiddlewares");
 const upload = require("../middlewares/uploadMiddleware");
 
-router.post('/createProduct', productController.upload.array('media', 10), productController.createProduct);
+router.post(
+  '/createProduct',
+  productController.upload.array('media', 10),
+  productController.handleUploadError,
+  productController.createProduct
+);
 router.get("/products/xml", productController.getAllProductsXML);
 router.get("/allproducts", productController.getAllProducts);
 router.get("/product/:id", productController.getProductById);
 router.get("/product/slug/:slug", productController.getProductBySlug);
-router.put("/updateProduct/:id",productController.upload.array('media', 10), productController.updateProduct);
+router.put(
+  "/updateProduct/:id",
+  productController.upload.array('media', 10),
+  productController.handleUploadError,
+  productController.updateProduct
+);
 router.delete("/deleteProduct/:id", productController.deleteProduct);
 router.get("/search", productController.searchProducts);
 router.get("/totalProductcount", productController.getProductCount);

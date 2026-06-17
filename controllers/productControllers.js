@@ -4,26 +4,82 @@ const BASE_URL = "https://drbskhealthcare.com";
 
 const multer = require("multer");
 const path = require("path");
+const fs = require("fs");
 
 // Storage config
 const storage = multer.diskStorage({
   destination: function (req, file, cb) {
-    cb(null, "uploads/products/");
+    const uploadDir = path.join(__dirname, "../uploads/products");
+    fs.mkdirSync(uploadDir, { recursive: true });
+    cb(null, uploadDir);
   },
   filename: function (req, file, cb) {
     const uniqueSuffix = Date.now() + "-" + Math.round(Math.random() * 1e9);
-    cb(null, uniqueSuffix + "-" + file.originalname);
+    const safeName = file.originalname.replace(/[^a-zA-Z0-9._-]/g, "-");
+    cb(null, uniqueSuffix + "-" + safeName);
   },
 });
 
-exports.upload = multer({ storage: storage });
+const mediaFileFilter = (req, file, cb) => {
+  if (file.mimetype.startsWith("image/") || file.mimetype.startsWith("video/")) {
+    cb(null, true);
+    return;
+  }
+  cb(new Error("Only image and video files are allowed"), false);
+};
+
+exports.upload = multer({
+  storage,
+  fileFilter: mediaFileFilter,
+  limits: {
+    fileSize: 25 * 1024 * 1024,
+    files: 10,
+  },
+});
+
+exports.handleUploadError = (error, req, res, next) => {
+  if (!error) {
+    next();
+    return;
+  }
+
+  if (error instanceof multer.MulterError) {
+    const messages = {
+      LIMIT_FILE_SIZE: "Each media file must be 25MB or smaller",
+      LIMIT_FILE_COUNT: "You can upload up to 10 media files per product",
+      LIMIT_UNEXPECTED_FILE: "Only product media files are allowed in this upload",
+    };
+    res.status(400).json({ message: messages[error.code] || error.message });
+    return;
+  }
+
+  res.status(400).json({ message: error.message });
+};
+
+const parseQuantity = (quantity) => {
+  if (!quantity) return [];
+  if (Array.isArray(quantity)) return quantity;
+  try {
+    const parsed = JSON.parse(quantity);
+    return Array.isArray(parsed) ? parsed : [parsed];
+  } catch {
+    return [];
+  }
+};
+
+const normalizeExistingMediaUrl = (url = "") => {
+  if (!url) return "";
+  return url
+    .replace(BASE_URL, "")
+    .replace(/^https?:\/\/[^/]+/, "");
+};
 
 // Create a new product
 // const path = require("path");
 
 exports.createProduct = async (req, res) => {
   try {
-    const mediaFiles = Object.values(req.files || {}).map(file => ({
+    const mediaFiles = (Array.isArray(req.files) ? req.files : Object.values(req.files || {})).map(file => ({
       url: `/uploads/products/${file.filename}`,
       type: file.mimetype.startsWith("video") ? "video" : "image",
       name: file.originalname,
@@ -42,7 +98,7 @@ exports.createProduct = async (req, res) => {
       ...req.body,
       slug,
       media: mediaFiles,
-      quantity: req.body.quantity ? JSON.parse(req.body.quantity) : [] // ✅ FIX
+      quantity: parseQuantity(req.body.quantity)
     };
 
     const product = new Product(productData);
@@ -262,32 +318,51 @@ exports.getProductById = async (req, res) => {
 // option 2: with media
 exports.updateProduct = async (req, res) => {
   try {
+    const { existingMedia: existingMediaBody, quantity, ...body } = req.body;
+
     // Parse incoming form data
-    const existingMedia = Array.isArray(req.body.existingMedia)
-      ? req.body.existingMedia
-      : req.body.existingMedia
-        ? [req.body.existingMedia]
+    const existingMedia = Array.isArray(existingMediaBody)
+      ? existingMediaBody
+      : existingMediaBody
+        ? [existingMediaBody]
         : [];
 
-    const newMedia = Object.values(req.files || {}).map(file => ({
+    const newMedia = (Array.isArray(req.files) ? req.files : Object.values(req.files || {})).map(file => ({
       url: `/uploads/products/${file.filename}`,
       type: file.mimetype.startsWith("video") ? "video" : "image",
       name: file.originalname,
       size: file.size
     }));
 
-    const mergedMedia = [...newMedia, ...existingMedia.map(url => ({
-      url,
-      type: url.includes('.mp4') ? 'video' : 'image',
-      name: path.basename(url),
-      size: 0 // size unknown, optional
-    }))];
+    const mergedMedia = [
+      ...existingMedia.map(url => {
+        const normalizedUrl = normalizeExistingMediaUrl(url);
+        return {
+          url: normalizedUrl,
+          type: normalizedUrl.match(/\.(mp4|webm|mov|avi|mkv)$/i) ? 'video' : 'image',
+          name: path.basename(normalizedUrl),
+          size: 0
+        };
+      }),
+      ...newMedia
+    ];
+
+    let slug;
+    if (body.name) {
+      slug = slugify(body.name);
+      const existing = await Product.findOne({ slug, _id: { $ne: req.params.id } });
+      if (existing) {
+        slug = slug + "-" + Date.now();
+      }
+    }
 
     const updatedProduct = await Product.findByIdAndUpdate(
       req.params.id,
       {
-        ...req.body,
+        ...body,
+        ...(slug ? { slug } : {}),
         media: mergedMedia,
+        quantity: parseQuantity(quantity),
         updatedAt: Date.now()
       },
       { new: true, runValidators: true }

@@ -2112,6 +2112,7 @@ router.post('/createCOD', async (req, res) => {
       baseAmount,
       codCharge,
       isGuest,
+      userName: requestedUserName,
       productName,
       productImage,
       paymentMethod,
@@ -2157,7 +2158,7 @@ router.post('/createCOD', async (req, res) => {
     const orderId = `COD${Date.now()}${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
 
     // Prepare user name
-    const userName = email.split('@')[0] || 'Customer';
+    const userName = requestedUserName?.toString().trim() || email.split('@')[0] || 'Customer';
 
     // Calculate base amount and cod charge
     let calculatedBaseAmount = 0;
