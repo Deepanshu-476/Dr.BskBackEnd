@@ -1,7 +1,15 @@
 const mongoose = require("mongoose");
+const { generateBskId } = require("../utils/bskIds");
 
 const newarrivalSchema = mongoose.Schema(
   {
+    publicId: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
+      default: () => generateBskId("NA"),
+    },
     name: { type: String },
     description: { type: String },
     image: { type: String },

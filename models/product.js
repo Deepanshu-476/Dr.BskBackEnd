@@ -1,7 +1,15 @@
 const mongoose = require("mongoose");
+const { generateBskId } = require("../utils/bskIds");
 
 const productSchema = mongoose.Schema(
   {
+    publicId: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
+      default: () => generateBskId("P"),
+    },
     name: { type: String },
     slug: { 
       type: String, 
@@ -36,5 +44,12 @@ const productSchema = mongoose.Schema(
   },
   { timestamps: true }
 );
+
+productSchema.pre("validate", function (next) {
+  if (!this.publicId) {
+    this.publicId = generateBskId("P");
+  }
+  next();
+});
 
 module.exports = mongoose.model("Product", productSchema);

@@ -1,6 +1,14 @@
 const mongoose = require('mongoose');
+const { generateBskId } = require("../utils/bskIds");
 
 const orderSchema = new mongoose.Schema({
+  orderId: {
+    type: String,
+    unique: true,
+    sparse: true,
+    index: true,
+    default: () => generateBskId("O")
+  },
   // userId can be ObjectId for registered users OR string for guest users
   userId: {
     type: mongoose.Schema.Types.Mixed, // Changed from ObjectId to Mixed
@@ -173,7 +181,6 @@ const orderSchema = new mongoose.Schema({
 
 // Indexes for performance
 orderSchema.index({ userId: 1, createdAt: -1 });
-orderSchema.index({ razorpayOrderId: 1 });
 orderSchema.index({ 'paymentInfo.paymentId': 1 });
 orderSchema.index({ status: 1 });
 orderSchema.index({ userEmail: 1 });
@@ -182,7 +189,6 @@ orderSchema.index({ isGuest: 1 });
 orderSchema.index({ createdAt: -1 });
 orderSchema.index({ 'paymentInfo.status': 1 });
 orderSchema.index({ paymentMethod: 1 });
-orderSchema.index({ orderId: 1 });
 
 // Virtual for payment status display
 orderSchema.virtual('paymentStatusDisplay').get(function () {
@@ -263,6 +269,10 @@ orderSchema.virtual('frontendPaymentStatus').get(function () {
 
 // Pre-save validation and status management
 orderSchema.pre('save', function (next) {
+  if (!this.orderId) {
+    this.orderId = generateBskId("O");
+  }
+
   // Auto-detect guest user
   if (typeof this.userId === 'string' && this.userId.startsWith('guest_')) {
     this.isGuest = true;
@@ -464,7 +474,8 @@ orderSchema.methods.canModify = function (userId) {
 // Instance method to get order summary
 orderSchema.methods.getSummary = function () {
   return {
-    orderId: this._id,
+    orderId: this.orderId,
+    internalId: this._id,
     totalAmount: this.totalAmount,
     status: this.status,
     paymentStatus: this.paymentInfo.status,

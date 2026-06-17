@@ -1,6 +1,14 @@
 const mongoose = require('mongoose');
+const { generateBskId } = require("../utils/bskIds");
 
 const couponSchema = new mongoose.Schema({
+  publicId: {
+    type: String,
+    unique: true,
+    sparse: true,
+    index: true,
+    default: () => generateBskId("CPN")
+  },
   code: {
     type: String,
     required: true,

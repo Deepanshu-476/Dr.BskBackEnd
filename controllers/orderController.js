@@ -4,6 +4,7 @@ const Product = require("../models/product");
 const Razorpay = require("razorpay");
 const crypto = require("crypto");
 const nodemailer = require("nodemailer");
+const { getEmailLocalPart, pickCustomerName } = require("../utils/customerName");
 
 const razorpayInstance = new Razorpay({
   key_id: process.env.RAZORPAY_KEY_ID,
@@ -42,14 +43,15 @@ const transporter = nodemailer.createTransport({
 
 const sendOrderConfirmationEmail = async (order, userEmail) => {
   try {
+    const displayOrderId = order.orderId || `BSK-O-${String(order._id).slice(-8).toUpperCase()}`;
     await transporter.sendMail({
       from: process.env.SMTP_USER,
       to: userEmail,
-      subject: `Order Confirmation #${order._id}`,
+      subject: `Order Confirmation #${displayOrderId}`,
       html: `
         <h2>Order Confirmed</h2>
         <p>Your order has been placed successfully.</p>
-        <p><strong>Order ID:</strong> ${order._id}</p>
+        <p><strong>Order ID:</strong> ${displayOrderId}</p>
         <p><strong>Total:</strong> ₹${order.totalAmount}</p>
       `,
     });
@@ -110,6 +112,10 @@ exports.verifyPayment = async (req, res) => {
       phone,
       email,
       totalAmount,
+      userName: requestedUserName,
+      fullName,
+      customerName,
+      name,
     } = req.body;
 
     const generatedSignature = crypto
@@ -124,19 +130,23 @@ exports.verifyPayment = async (req, res) => {
       });
     }
 
-    let userName = "Customer";
+    let userName = pickCustomerName({ name: requestedUserName || fullName || customerName || name, email });
     let isGuest = false;
 
     if (userId.startsWith("guest_")) {
       isGuest = true;
-      userName = email.split("@")[0];
+      userName = userName || getEmailLocalPart(email) || "Customer";
     } else {
       const user = await Admin.findById(userId);
 
       if (user) {
-        userName = user.name;
+        userName = pickCustomerName(
+          { name: requestedUserName || fullName || customerName || name, email },
+          { name: user.name, email: user.email || email }
+        ) || getEmailLocalPart(user.email || email) || "Customer";
       }
     }
+    userName = userName || getEmailLocalPart(email) || "Customer";
 
     const itemsWithMedia = await Promise.all(
       items.map(async (item) => {

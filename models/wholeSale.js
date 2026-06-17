@@ -1,6 +1,14 @@
 const mongoose = require('mongoose');
+const { generateBskId } = require("../utils/bskIds");
 
 const wholesalePartnerSchema = new mongoose.Schema({
+  publicId: {
+    type: String,
+    unique: true,
+    sparse: true,
+    index: true,
+    default: () => generateBskId("WS")
+  },
   companyName: { type: String },
   website: { type: String },
   gstNumber: { type: String, minlength: 15 },

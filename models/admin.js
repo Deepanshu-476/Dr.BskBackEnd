@@ -1,7 +1,15 @@
 const mongoose = require("mongoose");
+const { generateBskId } = require("../utils/bskIds");
 
 const adminSchema = mongoose.Schema(
   {
+    publicId: {
+      type: String,
+      unique: true,
+      sparse: true,
+      index: true,
+      default: () => generateBskId("U"),
+    },
     email: { type: String, unique: true, required: true },
     password: { type: String },
     role: { type: String, default: "User" }, // Default role set here

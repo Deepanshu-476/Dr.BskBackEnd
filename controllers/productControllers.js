@@ -164,6 +164,7 @@ let xml = `<?xml version="1.0" encoding="UTF-8"?>
 `;
 
 products.forEach(p => {
+  const feedProductId = p.publicId || `BSK-P-${String(p._id).slice(-8).toUpperCase()}`;
 
 
 let variants = [];
@@ -216,8 +217,8 @@ for (let v of variants) {
 
 xml += `
 <item>
-  <g:id>${p._id}</g:id>
-  <g:mpn>${p._id}</g:mpn>
+  <g:id>${feedProductId}</g:id>
+  <g:mpn>${feedProductId}</g:mpn>
 
   <g:title><![CDATA[${(p.name || "").trim()}]]></g:title>
 

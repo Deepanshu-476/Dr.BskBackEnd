@@ -7,6 +7,7 @@ const { logger } = require("../utils/logger");
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
+const { getEmailLocalPart, isUsefulCustomerName, pickCustomerName } = require('../utils/customerName');
 
 // Debug middleware
 router.use((req, res, next) => {
@@ -56,8 +57,53 @@ const transporter = nodemailer.createTransport({
   }
 });
 
+const enrichOrderCustomerNames = async (orders) => {
+  const userIds = [
+    ...new Set(
+      orders
+        .map(order => order.userId)
+        .filter(userId => typeof userId === 'string' && !userId.startsWith('guest_') && /^[a-f\d]{24}$/i.test(userId))
+    )
+  ];
+
+  const emails = [
+    ...new Set(
+      orders
+        .map(order => (order.userEmail || order.email || '').toLowerCase())
+        .filter(Boolean)
+    )
+  ];
+
+  const [usersById, usersByEmail] = await Promise.all([
+    userIds.length ? Admin.find({ _id: { $in: userIds } }).select('name email').lean() : [],
+    emails.length ? Admin.find({ email: { $in: emails } }).select('name email').lean() : []
+  ]);
+
+  const byId = new Map(usersById.map(user => [String(user._id), user]));
+  const byEmail = new Map(usersByEmail.map(user => [String(user.email || '').toLowerCase(), user]));
+
+  return orders.map(order => {
+    const email = order.userEmail || order.email || '';
+    const emailKey = String(email).toLowerCase();
+    const idProfile = byId.get(String(order.userId));
+    const emailProfile = byEmail.get(emailKey);
+    const profile =
+      emailProfile ||
+      (String(idProfile?.email || '').toLowerCase() === emailKey ? idProfile : null);
+    const profileName = profile?.name;
+    if (isUsefulCustomerName(profileName, email) && !isUsefulCustomerName(order.userName, email)) {
+      return { ...order, userName: profileName };
+    }
+    if (!isUsefulCustomerName(order.userName, email)) {
+      return { ...order, userName: getEmailLocalPart(email) || 'Customer' };
+    }
+    return order;
+  });
+};
+
 // Email template function
 const generateOrderEmailTemplate = (order, user) => {
+  const displayOrderId = order.orderId || `BSK-O-${String(order._id).slice(-8).toUpperCase()}`;
   const itemsHtml = order.items.map(item => `
     <tr>
       <td style="padding: 10px; border: 1px solid #ddd;">
@@ -80,7 +126,7 @@ const generateOrderEmailTemplate = (order, user) => {
     <head>
       <meta charset="UTF-8">
       <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Order Confirmation - ${order._id}</title>
+      <title>Order Confirmation - ${displayOrderId}</title>
       <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 20px; background-color: #f7f9fc; }
         .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
@@ -125,7 +171,7 @@ const generateOrderEmailTemplate = (order, user) => {
             <div class="info-grid">
               <div class="info-item">
                 <div class="info-label">Order ID</div>
-                <div class="info-value order-id">${order._id}</div>
+                <div class="info-value order-id">${displayOrderId}</div>
               </div>
               <div class="info-item">
                 <div class="info-label">Order Date</div>
@@ -218,23 +264,24 @@ const generateOrderEmailTemplate = (order, user) => {
 // Function to send order confirmation email
 const sendOrderConfirmationEmail = async (order, userEmail, userName) => {
   try {
+    const displayOrderId = order.orderId || `BSK-O-${String(order._id).slice(-8).toUpperCase()}`;
     const mailOptions = {
       from: {
         name: process.env.STORE_NAME || 'Your Store',
         address: process.env.SMTP_FROM || process.env.SMTP_USER || 'noreply@yourstore.com'
       },
       to: userEmail,
-      subject: `Order Confirmation #${order._id} - ${process.env.STORE_NAME || 'Your Store'}`,
+      subject: `Order Confirmation #${displayOrderId} - ${process.env.STORE_NAME || 'Your Store'}`,
       html: generateOrderEmailTemplate(order, { email: userEmail, name: userName }),
       text: `
-Order Confirmation #${order._id}
+Order Confirmation #${displayOrderId}
 
 Dear ${userName || 'Customer'},
 
 Thank you for your order! We have received your order and it is being processed.
 
 ORDER DETAILS:
-Order ID: ${order._id}
+Order ID: ${displayOrderId}
 Order Date: ${new Date(order.createdAt).toLocaleString()}
 Status: ${order.status}
 Total Amount: ₹${order.totalAmount.toFixed(2)}
@@ -625,7 +672,7 @@ router.get('/orders/email/:email', async (req, res) => {
     .lean();
 
     // Process media URLs
-    const processedOrders = orders.map(order => {
+    const processedOrders = await enrichOrderCustomerNames(orders.map(order => {
       if (order.items) {
         order.items = order.items.map(item => {
           if (item.media && Array.isArray(item.media) && item.media.length > 0) {
@@ -643,7 +690,7 @@ router.get('/orders/email/:email', async (req, res) => {
         });
       }
       return order;
-    });
+    }));
 
     res.status(200).json({
       success: true,
@@ -752,7 +799,8 @@ router.post('/orders/link-guest-orders', async (req, res) => {
       message: `Linked ${result.modifiedCount} guest orders to your account`,
       linkedCount: result.modifiedCount,
       orders: guestOrders.map(order => ({
-        orderId: order._id,
+        orderId: order.orderId || `BSK-O-${String(order._id).slice(-8).toUpperCase()}`,
+        internalId: order._id,
         createdAt: order.createdAt,
         totalAmount: order.totalAmount
       }))
@@ -927,17 +975,21 @@ router.post('/createPaymentOrder', async (req, res) => {
 
 // Verify Payment and Create Order with Email
 router.post('/verifyPayment', async (req, res) => {
-  const { 
-    razorpay_order_id, 
-    razorpay_payment_id, 
-    razorpay_signature,
-    userId,
-    items,
-    address,
-    phone,
-    email,
-    totalAmount
-  } = req.body;
+    const { 
+      razorpay_order_id, 
+      razorpay_payment_id, 
+      razorpay_signature,
+      userId,
+      items,
+      address,
+      phone,
+      email,
+      totalAmount,
+      userName: requestedUserName,
+      fullName,
+      customerName,
+      name
+    } = req.body;
 
   console.log("=== VERIFY PAYMENT REQUEST ===");
   console.log("Payment verification data:", {
@@ -1017,26 +1069,30 @@ router.post('/verifyPayment', async (req, res) => {
 
     // Prepare user details
     let userEmail = email;
-    let userName = 'Customer';
+    let userName = pickCustomerName({ name: requestedUserName || fullName || customerName || name, email });
     let isGuest = false;
 
     if (userId.startsWith('guest_')) {
       console.log("Processing guest order");
       isGuest = true;
-      userName = email.split('@')[0] || 'Customer';
+      userName = pickCustomerName({ name: requestedUserName || fullName || customerName || name, email }, userName) || getEmailLocalPart(email) || 'Customer';
     } else {
       try {
         const user = await Admin.findById(userId);
         if (user) {
           userEmail = user.email || email;
-          userName = user.name || email.split('@')[0] || 'Customer';
+          userName = pickCustomerName(
+            { name: requestedUserName || fullName || customerName || name, email: userEmail },
+            { name: user.name, email: userEmail }
+          ) || getEmailLocalPart(userEmail) || 'Customer';
         } else {
           isGuest = true;
-          userName = email.split('@')[0] || 'Customer';
+          userName = pickCustomerName({ name: requestedUserName || fullName || customerName || name, email }) || getEmailLocalPart(email) || 'Customer';
         }
       } catch (error) {
         console.error("Error fetching user:", error.message);
         isGuest = true;
+        userName = userName || getEmailLocalPart(email) || 'Customer';
       }
     }
 
@@ -1160,7 +1216,8 @@ router.post('/verifyPayment', async (req, res) => {
     // Log success
     if (typeof logger !== 'undefined' && logger && typeof logger.info === 'function') {
       logger.info("Order created successfully", {
-        orderId: savedOrder._id,
+        orderId: savedOrder.orderId,
+        internalId: savedOrder._id,
         razorpayOrderId: razorpay_order_id,
         razorpayPaymentId: razorpay_payment_id,
         userId: userId,
@@ -1175,9 +1232,10 @@ router.post('/verifyPayment', async (req, res) => {
     res.status(201).json({
       success: true,
       message: "Order created successfully!",
-      orderId: savedOrder._id.toString(),
+      orderId: savedOrder.orderId,
       order: {
         _id: savedOrder._id,
+        orderId: savedOrder.orderId,
         status: savedOrder.status,
         totalAmount: savedOrder.totalAmount,
         createdAt: savedOrder.createdAt,
@@ -1710,7 +1768,7 @@ router.get('/orders/by-email/:email', async (req, res) => {
 
     console.log(`Found ${orders.length} orders for email: ${email}`);
 
-    const processedOrders = orders.map(order => {
+    const processedOrders = await enrichOrderCustomerNames(orders.map(order => {
       if (order.items) {
         order.items = order.items.map(item => {
           if (item.media && Array.isArray(item.media) && item.media.length > 0) {
@@ -1729,7 +1787,7 @@ router.get('/orders/by-email/:email', async (req, res) => {
         });
       }
       return order;
-    });
+    }));
 
     res.status(200).json({
       success: true,
@@ -1762,7 +1820,7 @@ router.get('/orders/:userId', async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    const processedOrders = orders.map(order => {
+    const processedOrders = await enrichOrderCustomerNames(orders.map(order => {
       if (order.items) {
         order.items = order.items.map(item => {
           if (item.media && Array.isArray(item.media) && item.media.length > 0) {
@@ -1781,7 +1839,7 @@ router.get('/orders/:userId', async (req, res) => {
         });
       }
       return order;
-    });
+    }));
 
     res.status(200).json({
       success: true,
@@ -1812,7 +1870,7 @@ router.get('/orders', async (req, res) => {
       .sort({ createdAt: -1 })
       .lean();
 
-    const processedOrders = orders.map(order => {
+    const processedOrders = await enrichOrderCustomerNames(orders.map(order => {
       if (order.items) {
         order.items = order.items.map(item => {
           if (item.media && Array.isArray(item.media) && item.media.length > 0) {
@@ -1830,7 +1888,7 @@ router.get('/orders', async (req, res) => {
         });
       }
       return order;
-    });
+    }));
 
     res.status(200).json({
       success: true,
@@ -2113,6 +2171,9 @@ router.post('/createCOD', async (req, res) => {
       codCharge,
       isGuest,
       userName: requestedUserName,
+      fullName,
+      customerName,
+      name,
       productName,
       productImage,
       paymentMethod,
@@ -2158,7 +2219,18 @@ router.post('/createCOD', async (req, res) => {
     const orderId = `COD${Date.now()}${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
 
     // Prepare user name
-    const userName = requestedUserName?.toString().trim() || email.split('@')[0] || 'Customer';
+    let profileUser = null;
+    if (userId && !String(userId).startsWith('guest_') && /^[a-f\d]{24}$/i.test(String(userId))) {
+      profileUser = await Admin.findById(userId).select('name email').lean().catch(() => null);
+    }
+    if (!profileUser) {
+      profileUser = await Admin.findOne({ email: String(email).toLowerCase() }).select('name email').lean().catch(() => null);
+    }
+
+    const userName = pickCustomerName(
+      { name: requestedUserName || fullName || customerName || name, email },
+      { name: profileUser?.name, email: profileUser?.email || email }
+    ) || getEmailLocalPart(email) || 'Customer';
 
     // Calculate base amount and cod charge
     let calculatedBaseAmount = 0;
@@ -2322,7 +2394,7 @@ router.post('/createCOD', async (req, res) => {
     return res.status(201).json({
       success: true,
       message: "COD order created successfully!",
-      orderId: savedOrder._id.toString(),
+      orderId: savedOrder.orderId,
       orderDetails: {
         _id: savedOrder._id,
         orderId: savedOrder.orderId,
