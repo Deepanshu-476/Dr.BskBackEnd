@@ -438,6 +438,63 @@ exports.getProductCount = async (req, res) => {
 };
 
 
+
+
+// Soft delete a product
+exports.deleteProduct = async (req, res) => {
+  try {
+    const deletedProduct = await Product.findByIdAndDelete(req.params.id);
+
+    if (!deletedProduct) {
+      logger.warn(`Product not found for deletion: ${req.params.id}`);
+      return res.status(404).json({ message: "Product not found" });
+    }
+
+    logger.info(`Product permanently deleted: ${deletedProduct._id}`);
+    res.status(200).json({ message: "Product permanently deleted successfully" });
+  } catch (error) {
+    logger.error(`Error deleting product (${req.params.id}):`, error);
+    res.status(500).json({ message: error.message });
+  }
+};
+// Get all product images
+exports.getAllProductImages = async (req, res) => {
+  try {
+    const products = await Product.find({ deleted_at: null }, 'media');
+
+    const images = products.flatMap(product =>
+      product.media.filter(file => file.type === 'image')
+    );
+
+    res.status(200).json(images);
+  } catch (error) {
+    logger.error("Error fetching product images:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+// Get total product count
+exports.getProductCount = async (req, res) => {
+  try {
+    // Count products that are not deleted
+    const count = await Product.countDocuments({ deleted_at: null });
+
+    // Get only createdAt field for those products (exclude _id)
+    const createdDates = await Product.find({ deleted_at: null }).select({ createdAt: 1, _id: 0 });
+
+    logger.info(`Total product count: ${count}`);
+
+    res.status(200).json({
+      total: count,
+      createdDates: createdDates,
+    });
+  } catch (error) {
+    logger.error("Error fetching product count:", error);
+    res.status(500).json({ message: error.message });
+  }
+};
+
+
 // Search products by name and suggest similar products
 exports.searchProducts = async (req, res) => {
   try {
@@ -484,5 +541,104 @@ exports.getProductBySlug = async (req, res) => {
   } catch (error) {
     console.error("GET PRODUCT BY SLUG ERROR:", error);
     res.status(500).json({ message: error.message });
+  }
+};
+
+// Serve HTML Product landing page for deferred deep linking fallback
+exports.serveProductLandingPage = async (req, res) => {
+  try {
+    const productId = req.params.id;
+    
+    // Check if productId is a valid MongoDB ObjectId
+    const mongoose = require('mongoose');
+    if (!mongoose.Types.ObjectId.isValid(productId)) {
+      return res.status(404).send('<h3>Invalid Product ID</h3>');
+    }
+
+    const product = await Product.findById(productId);
+    if (!product || product.deleted_at !== null) {
+      return res.status(404).send('<h3>Product not found</h3>');
+    }
+
+    // Load templates/product-share.html
+    const templatePath = path.join(__dirname, '../templates/product-share.html');
+    if (!fs.existsSync(templatePath)) {
+      return res.status(500).send('<h3>Server Error: Share template not found</h3>');
+    }
+
+    let html = fs.readFileSync(templatePath, 'utf8');
+
+    // Get config variables
+    const baseUrl = process.env.BASE_URL || 'https://drbskhealthcare.com';
+    const androidUrl = process.env.ANDROID_APP_URL || 'https://play.google.com/store/apps/details?id=com.cupid_cakes';
+    const iosUrl = process.env.IOS_APP_URL || 'https://apps.apple.com/app/id644476000';
+    const scheme = process.env.DEEP_LINK_SCHEME || 'drbsk';
+
+    // Parse product details
+    const productName = product.name || 'DR.BSK Product';
+    
+    // Get product price
+    const priceVal = product.consumer_price || product.retail_price || product.mrp || '0.00';
+    
+    // Get media image URL
+    let imageUrl = '';
+    if (product.media && product.media.length > 0) {
+      const mediaItem = product.media[0];
+      if (mediaItem.url) {
+        if (mediaItem.url.startsWith('http://') || mediaItem.url.startsWith('https://')) {
+          imageUrl = mediaItem.url;
+        } else {
+          // Prepend base URL
+          imageUrl = `${baseUrl.replace(/\/+$/, '')}/${mediaItem.url.replace(/^\/+/, '')}`;
+        }
+      }
+    }
+    if (!imageUrl) {
+      imageUrl = `${baseUrl.replace(/\/+$/, '')}/uploads/products/placeholder.png`; // standard fallback
+    }
+
+    const plainDescription = product.description 
+      ? product.description.replace(/<[^>]*>/g, '').trim() 
+      : 'Order authentic health and wellness products directly from DR.BSK Healthcare app.';
+      
+    const shortDescription = plainDescription.length > 150 
+      ? plainDescription.substring(0, 147) + '...' 
+      : plainDescription;
+
+    const productUrl = `${baseUrl.replace(/\/+$/, '')}/product/${productId}`;
+    const schemeUrl = `${scheme}://product/${productId}`;
+
+    // Simple template rendering
+    html = html.replace(/{{PRODUCT_NAME}}/g, productName);
+    html = html.replace(/{{PRODUCT_PRICE}}/g, priceVal);
+    html = html.replace(/{{PRODUCT_IMAGE}}/g, imageUrl);
+    html = html.replace(/{{PRODUCT_DESCRIPTION_PLAIN}}/g, plainDescription);
+    html = html.replace(/{{PRODUCT_DESCRIPTION_SHORT}}/g, shortDescription);
+    html = html.replace(/{{PRODUCT_URL}}/g, productUrl);
+    html = html.replace(/{{APP_SCHEME_URL}}/g, schemeUrl);
+    html = html.replace(/{{PRODUCT_ID}}/g, productId);
+    html = html.replace(/{{ANDROID_URL}}/g, androidUrl);
+    html = html.replace(/{{IOS_URL}}/g, iosUrl);
+
+    // Render simple Handlebars style conditional blocks if they exist
+    // MRP
+    if (product.mrp && product.mrp !== priceVal) {
+      html = html.replace(/{{#if PRODUCT_MRP}}([\s\S]*?){{\/if}}/g, `$1`.replace(/{{PRODUCT_MRP}}/g, product.mrp));
+    } else {
+      html = html.replace(/{{#if PRODUCT_MRP}}[\s\S]*?{{\/if}}/g, '');
+    }
+
+    // Discount
+    if (product.discount) {
+      html = html.replace(/{{#if PRODUCT_DISCOUNT}}([\s\S]*?){{\/if}}/g, `$1`.replace(/{{PRODUCT_DISCOUNT}}/g, product.discount));
+    } else {
+      html = html.replace(/{{#if PRODUCT_DISCOUNT}}[\s\S]*?{{\/if}}/g, '');
+    }
+
+    res.setHeader('Content-Type', 'text/html');
+    res.status(200).send(html);
+  } catch (error) {
+    console.error('SHARE PAGE ERROR:', error);
+    res.status(500).send(`<h3>Server Error</h3><p>${error.message}</p>`);
   }
 };

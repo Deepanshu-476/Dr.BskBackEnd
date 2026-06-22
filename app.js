@@ -4,6 +4,7 @@ const cors = require("cors");
 const connectDB = require("./config/db");
 const adminRoutes = require("./routes/admin");
 const usersRoutes = require("./routes/users");
+const productController = require("./controllers/productControllers");
 const orderRoutes = require("./routes/order");
 const nodemailer = require('nodemailer');
 const razorpayWebhookRouter = require('./routes/razorpayWebhook');
@@ -198,6 +199,7 @@ app.use('/api', require('./routes/paymentSettings'));
 // Use routes - यहाँ सभी routes को mount करें
 app.use('/admin', adminRoutes);
 app.use('/user', usersRoutes);
+app.get('/product/:id', productController.serveProductLandingPage);
 app.use('/api', orderRoutes);
 app.use('/webhook', razorpayWebhookRouter);
 app.use('/api/coupons', couponRoutes);
