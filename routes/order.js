@@ -1030,7 +1030,7 @@ const sendMagicCheckoutShippingInfo = (req, res) => {
     addresses: addresses.map((address, index) => {
       const zipcode = String(address?.zipcode || '').trim();
       const country = String(address?.country || 'IN').trim().toUpperCase();
-      const serviceable = country === 'IN' && /^\d{6}$/.test(zipcode);
+      const serviceable = ['IN', 'IND', 'INDIA'].includes(country) && /^\d{6}$/.test(zipcode);
 
       return {
         id: String(address?.id ?? index),
