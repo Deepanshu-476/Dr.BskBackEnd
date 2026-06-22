@@ -28,8 +28,10 @@ connectDB();
 app.use(cors({
     origin: [
         'http://localhost:3000',
-        'https://drbskhealthcare.com/',
-        'https://drbskhealthcare.in/'
+        'https://drbskhealthcare.com',
+        'https://www.drbskhealthcare.com',
+        'https://drbskhealthcare.in',
+        'https://www.drbskhealthcare.in'
     ],
     credentials: true,
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],

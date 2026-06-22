@@ -3,6 +3,7 @@ const router = express.Router();
 const Order = require('../models/order');
 const Admin = require('../models/admin');
 const Product = require('../models/product');
+const WholesalePartner = require('../models/wholeSale');
 const { logger } = require("../utils/logger");
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
@@ -42,6 +43,156 @@ try {
   console.error("❌ Failed to initialize Razorpay:", initError.message);
   throw initError;
 }
+
+const parseProductVariants = (raw) => {
+  try {
+    let value = raw;
+    if (Array.isArray(value) && value.length === 1 && typeof value[0] === 'string') {
+      value = JSON.parse(value[0]);
+    } else if (typeof value === 'string') {
+      value = JSON.parse(value);
+    }
+    if (Array.isArray(value) && Array.isArray(value[0])) value = value.flat();
+    return Array.isArray(value) ? value : [];
+  } catch (_) {
+    return [];
+  }
+};
+
+const toPositivePaise = (value) => {
+  const amount = Number(value);
+  return Number.isFinite(amount) && amount > 0 ? Math.round(amount * 100) : 0;
+};
+
+const firstPositivePaise = (...values) => {
+  for (const value of values) {
+    const paise = toPositivePaise(value);
+    if (paise) return paise;
+  }
+  return 0;
+};
+
+const resolveMagicPricingTier = async (userId, requestedTier) => {
+  if (requestedTier !== 'wholesale' || !/^[a-f\d]{24}$/i.test(String(userId || ''))) {
+    return 'consumer';
+  }
+
+  const partner = await WholesalePartner.findOne({
+    _id: userId,
+    status: { $regex: /^(approved|active)$/i }
+  }).select('_id').lean();
+  return partner ? 'wholesale' : 'consumer';
+};
+
+const buildCanonicalMagicCart = async (requestedItems, userId, requestedTier) => {
+  if (!Array.isArray(requestedItems) || requestedItems.length === 0 || requestedItems.length > 50) {
+    throw new Error('A valid cart is required');
+  }
+
+  const pricingTier = await resolveMagicPricingTier(userId, requestedTier);
+  const ids = [...new Set(requestedItems.map(item => String(item?.productId || '')))];
+  if (ids.some(id => !/^[a-f\d]{24}$/i.test(id))) {
+    throw new Error('Cart contains an invalid product');
+  }
+
+  const products = await Product.find({
+    _id: { $in: ids },
+    deleted_at: null
+  }).lean();
+  const byId = new Map(products.map(product => [String(product._id), product]));
+
+  const items = requestedItems.map((requestedItem) => {
+    const product = byId.get(String(requestedItem.productId));
+    if (!product) throw new Error('A product in your cart is no longer available');
+
+    const quantity = Number.parseInt(requestedItem.quantity, 10);
+    if (!Number.isSafeInteger(quantity) || quantity < 1 || quantity > 100) {
+      throw new Error(`Invalid quantity for ${product.name || 'product'}`);
+    }
+
+    const variants = parseProductVariants(product.quantity);
+    const requestedVariant = String(requestedItem.variant || requestedItem.variantId || '').trim();
+    const variant = variants.find(candidate =>
+      [candidate?._id, candidate?.label].some(value =>
+        value !== undefined && String(value).trim() === requestedVariant
+      )
+    ) || (requestedVariant === 'Standard Pack' || !requestedVariant ? variants[0] : null);
+
+    if (variants.length > 0 && !variant) {
+      throw new Error(`Selected variant for ${product.name} is no longer available`);
+    }
+    const inStock = variant
+      ? (typeof variant.in_stock === 'string'
+        ? variant.in_stock.toLowerCase() === 'yes'
+        : variant.in_stock !== false)
+      : String(product.stock || '').toLowerCase() !== 'out of stock';
+    if (!inStock) throw new Error(`${product.name} is out of stock`);
+
+    const pricePaise = pricingTier === 'wholesale'
+      ? firstPositivePaise(variant?.retail_price, product.retail_price)
+      : firstPositivePaise(
+          variant?.final_price,
+          product.consumer_price,
+          variant?.retail_price,
+          product.retail_price
+        );
+    if (!pricePaise) throw new Error(`Price is not configured for ${product.name}`);
+
+    const mrpPaise = Math.max(
+      pricePaise,
+      firstPositivePaise(variant?.mrp, product.mrp) || pricePaise
+    );
+    const imageUrl = getRazorpayImageUrl(product.media?.[0]?.url);
+
+    return {
+      productId: String(product._id),
+      name: String(product.name || '').trim(),
+      quantity,
+      price: pricePaise / 100,
+      mrp: mrpPaise / 100,
+      variant: String(variant?.label || requestedVariant || 'Standard Pack'),
+      description: String(product.description || product.name || '').trim().slice(0, 256),
+      ...(imageUrl ? { imageUrl } : {})
+    };
+  });
+
+  return {
+    items,
+    pricingTier,
+    amountInPaise: items.reduce(
+      (total, item) => total + Math.round(item.price * 100) * item.quantity,
+      0
+    )
+  };
+};
+
+const createMagicCheckoutToken = (payload) => {
+  const encoded = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = crypto
+    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+    .update(encoded)
+    .digest('base64url');
+  return `${encoded}.${signature}`;
+};
+
+const verifyMagicCheckoutToken = (token) => {
+  const [encoded, signature, extra] = String(token || '').split('.');
+  if (!encoded || !signature || extra) throw new Error('Invalid checkout token');
+  const expected = crypto
+    .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+    .update(encoded)
+    .digest();
+  const received = Buffer.from(signature, 'base64url');
+  if (received.length !== expected.length || !crypto.timingSafeEqual(received, expected)) {
+    throw new Error('Invalid checkout token');
+  }
+  const payload = JSON.parse(Buffer.from(encoded, 'base64url').toString('utf8'));
+  if (!payload?.orderId || !Array.isArray(payload.items) || !payload.expiresAt) {
+    throw new Error('Invalid checkout token');
+  }
+  if (Date.now() > payload.expiresAt) throw new Error('Checkout session has expired');
+  return payload;
+};
 
 // Email transporter setup
 const transporter = nodemailer.createTransport({
@@ -341,6 +492,25 @@ const processMediaUrl = (url) => {
   const baseWithoutTrailingSlash = baseUrl.endsWith('/') ? baseUrl.slice(0, -1) : baseUrl;
   
   return `${baseWithoutTrailingSlash}/${cleanUrl}`;
+};
+
+const getRazorpayImageUrl = (url) => {
+  if (!url || typeof url !== 'string' || url.startsWith('data:')) return '';
+
+  try {
+    if (!url.startsWith('http://') && !url.startsWith('https://')) {
+      const publicBaseUrl = process.env.PUBLIC_BASE_URL?.trim();
+      if (!publicBaseUrl || !publicBaseUrl.startsWith('https://')) return '';
+
+      return encodeURI(
+        `${publicBaseUrl.replace(/\/+$/, '')}/${url.replace(/^\/+/, '')}`
+      );
+    }
+
+    return url.startsWith('https://') ? encodeURI(url.trim()) : '';
+  } catch (_) {
+    return '';
+  }
 };
 
 // ==================== MONTHLY ORDER TOTALS API - NEW ====================
@@ -816,37 +986,112 @@ router.post('/orders/link-guest-orders', async (req, res) => {
   }
 });
 
+// Public callback configured in Razorpay Magic Checkout:
+// https://drbskhealthcare.com/api/payment/shipping-info
+const sendMagicCheckoutShippingInfo = (req, res) => {
+  const parseAddresses = (value) => {
+    if (Array.isArray(value)) return value;
+    if (!value) return [];
+
+    try {
+      const parsed = typeof value === 'string' ? JSON.parse(value) : value;
+      if (Array.isArray(parsed)) return parsed;
+      if (parsed && typeof parsed === 'object') return Object.values(parsed);
+    } catch (_) {
+      return [];
+    }
+
+    return [];
+  };
+
+  const addresses = [
+    ...parseAddresses(req.body?.addresses),
+    ...parseAddresses(req.query?.addresses)
+  ].filter((address, index, all) => {
+    const key = `${address?.id ?? index}:${address?.zipcode ?? ''}`;
+    return all.findIndex((candidate, candidateIndex) =>
+      `${candidate?.id ?? candidateIndex}:${candidate?.zipcode ?? ''}` === key
+    ) === index;
+  });
+
+  console.log('Magic Checkout shipping info request:', {
+    orderId: req.body?.order_id || req.query?.order_id,
+    razorpayOrderId: req.body?.razorpay_order_id || req.query?.razorpay_order_id,
+    addresses
+  });
+
+  res.set({
+    'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
+    Pragma: 'no-cache',
+    Expires: '0'
+  });
+
+  return res.status(200).json({
+    addresses: addresses.map((address, index) => {
+      const zipcode = String(address?.zipcode || '').trim();
+      const country = String(address?.country || 'IN').trim().toUpperCase();
+      const serviceable = country === 'IN' && /^\d{6}$/.test(zipcode);
+
+      return {
+        id: String(address?.id ?? index),
+        zipcode,
+        country,
+        shipping_methods: [{
+          id: 'standard-delivery',
+          name: 'Standard Delivery',
+          description: serviceable
+            ? 'Free standard delivery across India'
+            : 'Delivery is available only for valid Indian pincodes',
+          serviceable,
+          shipping_fee: 0,
+          cod: serviceable,
+          cod_fee: 0
+        }]
+      };
+    })
+  });
+};
+
+router.get('/payment/shipping-info', sendMagicCheckoutShippingInfo);
+router.post('/payment/shipping-info', sendMagicCheckoutShippingInfo);
+
 // Create Razorpay Order
 router.post('/createPaymentOrder', async (req, res) => {
-  const { userId, items, address, phone, totalAmount, email } = req.body;
+  const {
+    userId,
+    items,
+    address,
+    phone,
+    totalAmount,
+    email,
+    checkoutMode,
+    pricingTier
+  } = req.body;
 
   console.log("=== CREATE RAZORPAY ORDER REQUEST ===");
   console.log("Request body:", JSON.stringify(req.body, null, 2));
 
   try {
+    let paymentItems = items;
+    let orderTotal = Number(totalAmount);
+    let resolvedPricingTier = pricingTier;
+
+    if (checkoutMode === 'magic') {
+      const canonicalCart = await buildCanonicalMagicCart(items, userId, pricingTier);
+      paymentItems = canonicalCart.items;
+      orderTotal = canonicalCart.amountInPaise / 100;
+      resolvedPricingTier = canonicalCart.pricingTier;
+    }
+
     // Validation
-    if (!userId || !items || !Array.isArray(items) || items.length === 0) {
+    if (!userId || !paymentItems || !Array.isArray(paymentItems) || paymentItems.length === 0) {
       return res.status(400).json({
         success: false,
         message: "User ID and items are required"
       });
     }
 
-    if (!address?.trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "Address is required"
-      });
-    }
-
-    if (!phone?.toString().trim()) {
-      return res.status(400).json({
-        success: false,
-        message: "Phone number is required"
-      });
-    }
-
-    if (!totalAmount || totalAmount <= 0) {
+    if (!Number.isFinite(orderTotal) || orderTotal <= 0) {
       return res.status(400).json({
         success: false,
         message: "Valid total amount is required"
@@ -854,7 +1099,7 @@ router.post('/createPaymentOrder', async (req, res) => {
     }
 
     // Email validation
-    if (!email || !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
       return res.status(400).json({
         success: false,
         message: "Valid email address is required"
@@ -862,7 +1107,7 @@ router.post('/createPaymentOrder', async (req, res) => {
     }
 
     // Prepare phone number
-    let formattedPhone = phone.toString().trim();
+    let formattedPhone = phone?.toString().trim() || '';
     formattedPhone = formattedPhone.replace(/^\+91/, '').replace(/^91/, '');
     
     console.log("Phone validation:", {
@@ -872,13 +1117,13 @@ router.post('/createPaymentOrder', async (req, res) => {
       is10Digits: /^\d{10}$/.test(formattedPhone)
     });
     
-    if (!/^\d{10}$/.test(formattedPhone)) {
+    if (formattedPhone && !/^\d{10}$/.test(formattedPhone)) {
       return res.status(400).json({
         success: false,
         message: "Phone number must be exactly 10 digits"
       });
     }
-    formattedPhone = `+91${formattedPhone}`;
+    formattedPhone = formattedPhone ? `+91${formattedPhone}` : '';
 
     // Check Razorpay instance
     if (!razorpayInstance) {
@@ -890,7 +1135,43 @@ router.post('/createPaymentOrder', async (req, res) => {
     }
 
     // Calculate amount (convert to paise)
-    const amountInPaise = Math.round(totalAmount * 100);
+    const amountInPaise = Math.round(orderTotal * 100);
+    const lineItems = paymentItems.map((item, index) => {
+      const quantity = Math.max(1, parseInt(item.quantity, 10) || 1);
+      const offerPrice = Math.round(Number(item.price) * 100);
+      const originalPrice = Math.max(
+        offerPrice,
+        Math.round(Number(item.mrp || item.price) * 100)
+      );
+
+      if (!item.productId || !item.name || !Number.isFinite(offerPrice) || offerPrice <= 0) {
+        throw new Error(`Invalid item at position ${index + 1}`);
+      }
+
+      const imageUrl = getRazorpayImageUrl(item.imageUrl || item.image_url);
+
+      return {
+        sku: String(item.productId),
+        variant_id: String(item.variant || item.variantId || item.productId),
+        price: originalPrice,
+        offer_price: offerPrice,
+        quantity,
+        name: String(item.name).trim().slice(0, 256),
+        description: String(item.description || item.name).trim().slice(0, 256),
+        ...(imageUrl ? { image_url: imageUrl } : {})
+      };
+    });
+    const lineItemsTotal = lineItems.reduce(
+      (sum, item) => sum + (item.offer_price * item.quantity),
+      0
+    );
+
+    if (lineItemsTotal !== amountInPaise) {
+      return res.status(400).json({
+        success: false,
+        message: "Cart total does not match the item total"
+      });
+    }
     
     // Create receipt - make sure it's unique
     const receipt = `rcpt_${Date.now()}_${userId.toString().slice(-6)}`;
@@ -900,13 +1181,19 @@ router.post('/createPaymentOrder', async (req, res) => {
       amount: amountInPaise,
       currency: "INR",
       receipt: receipt,
+      line_items_total: lineItemsTotal,
+      line_items: lineItems,
       notes: {
         userId: userId.toString(),
-        phone: formattedPhone,
-        email: email,
-        address: address,
-        itemsCount: items.length.toString(),
-        amount: totalAmount.toString()
+        ...(formattedPhone ? { phone: formattedPhone } : {}),
+        ...(email ? { email } : {}),
+        ...(address ? { address: String(address).slice(0, 250) } : {}),
+        itemsCount: paymentItems.length.toString(),
+        amount: orderTotal.toString(),
+        ...(checkoutMode === 'magic' ? {
+          checkoutMode: 'magic',
+          pricingTier: resolvedPricingTier
+        } : {})
       }
     };
 
@@ -948,6 +1235,17 @@ router.post('/createPaymentOrder', async (req, res) => {
       });
     }
 
+    const checkoutToken = checkoutMode === 'magic'
+      ? createMagicCheckoutToken({
+          orderId: razorpayOrder.id,
+          userId: String(userId),
+          items: paymentItems,
+          amountInPaise,
+          pricingTier: resolvedPricingTier,
+          expiresAt: Date.now() + (30 * 60 * 1000)
+        })
+      : null;
+
     // Send success response with order details
     res.status(200).json({
       success: true,
@@ -956,9 +1254,11 @@ router.post('/createPaymentOrder', async (req, res) => {
         id: razorpayOrder.id,
         amount: razorpayOrder.amount,
         currency: razorpayOrder.currency,
-        receipt: razorpayOrder.receipt
+        receipt: razorpayOrder.receipt,
+        line_items_total: razorpayOrder.line_items_total
       },
-      key_id: process.env.RAZORPAY_KEY_ID // Send key_id to frontend for initialization
+      key_id: process.env.RAZORPAY_KEY_ID,
+      ...(checkoutToken ? { checkoutToken } : {})
     });
 
   } catch (error) {
@@ -988,7 +1288,8 @@ router.post('/verifyPayment', async (req, res) => {
       userName: requestedUserName,
       fullName,
       customerName,
-      name
+      name,
+      checkoutToken
     } = req.body;
 
   console.log("=== VERIFY PAYMENT REQUEST ===");
@@ -1001,6 +1302,9 @@ router.post('/verifyPayment', async (req, res) => {
   });
 
   try {
+    let verifiedUserId = userId;
+    let verifiedItems = items;
+
     // Validate required fields
     if (!razorpay_order_id || !razorpay_payment_id || !razorpay_signature) {
       return res.status(400).json({
@@ -1028,7 +1332,12 @@ router.post('/verifyPayment', async (req, res) => {
       match: generatedSignature === razorpay_signature
     });
 
-    if (generatedSignature !== razorpay_signature) {
+    const generatedBuffer = Buffer.from(generatedSignature, 'hex');
+    const receivedBuffer = Buffer.from(String(razorpay_signature), 'hex');
+    if (
+      receivedBuffer.length !== generatedBuffer.length ||
+      !crypto.timingSafeEqual(receivedBuffer, generatedBuffer)
+    ) {
       console.error("❌ Signature verification failed!");
       return res.status(400).json({
         success: false,
@@ -1038,10 +1347,15 @@ router.post('/verifyPayment', async (req, res) => {
 
     console.log("✅ Payment signature verified successfully");
 
-    // Fetch payment details from Razorpay
+    // Fetch both resources because Magic Checkout stores the customer's
+    // delivery details on the Razorpay order.
     let paymentDetails;
+    let razorpayOrderDetails;
     try {
-      paymentDetails = await razorpayInstance.payments.fetch(razorpay_payment_id);
+      [paymentDetails, razorpayOrderDetails] = await Promise.all([
+        razorpayInstance.payments.fetch(razorpay_payment_id),
+        razorpayInstance.orders.fetch(razorpay_order_id)
+      ]);
       console.log("Payment details from Razorpay:", {
         id: paymentDetails.id,
         status: paymentDetails.status,
@@ -1056,8 +1370,11 @@ router.post('/verifyPayment', async (req, res) => {
       });
     }
 
-    // Check if payment is captured
-    if (paymentDetails.status !== 'captured') {
+    const isCodPayment =
+      paymentDetails.method === 'cod' &&
+      ['pending', 'authorized', 'captured'].includes(paymentDetails.status);
+
+    if (paymentDetails.status !== 'captured' && !isCodPayment) {
       console.error("❌ Payment not captured:", paymentDetails.status);
       return res.status(400).json({
         success: false,
@@ -1067,37 +1384,134 @@ router.post('/verifyPayment', async (req, res) => {
 
     console.log("✅ Payment paid successfully");
 
+    const magicCustomer = razorpayOrderDetails?.customer_details || {};
+    const magicAddress =
+      magicCustomer.shipping_address ||
+      magicCustomer.billing_address ||
+      {};
+    const resolvedEmail = magicCustomer.email || paymentDetails.email || email;
+    const resolvedPhone =
+      magicAddress.contact ||
+      magicCustomer.contact ||
+      paymentDetails.contact ||
+      phone;
+    const resolvedName =
+      magicAddress.name ||
+      requestedUserName ||
+      fullName ||
+      customerName ||
+      name;
+    const resolvedAddress = [
+      magicAddress.line1,
+      magicAddress.line2,
+      magicAddress.city,
+      magicAddress.state,
+      magicAddress.zipcode,
+      magicAddress.country
+    ].filter(Boolean).join(', ') || address;
+
+    if (!resolvedEmail || !resolvedPhone || !resolvedAddress) {
+      return res.status(400).json({
+        success: false,
+        message: "Delivery details were not returned by Magic Checkout"
+      });
+    }
+
+    if (
+      paymentDetails.order_id !== razorpay_order_id ||
+      String(razorpayOrderDetails?.id) !== String(razorpay_order_id)
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment does not belong to this order"
+      });
+    }
+
+    const gatewayAmount = Number(razorpayOrderDetails?.amount);
+    if (
+      !Number.isFinite(gatewayAmount) ||
+      Number(paymentDetails.amount) !== gatewayAmount ||
+      String(paymentDetails.currency || '').toUpperCase() !== 'INR' ||
+      String(razorpayOrderDetails?.currency || '').toUpperCase() !== 'INR'
+    ) {
+      return res.status(400).json({
+        success: false,
+        message: "Payment amount or currency does not match the order"
+      });
+    }
+
+    if (razorpayOrderDetails?.notes?.checkoutMode === 'magic') {
+      let tokenPayload;
+      try {
+        tokenPayload = verifyMagicCheckoutToken(checkoutToken);
+      } catch (tokenError) {
+        return res.status(400).json({ success: false, message: tokenError.message });
+      }
+
+      if (
+        tokenPayload.orderId !== razorpay_order_id ||
+        Number(tokenPayload.amountInPaise) !== gatewayAmount
+      ) {
+        return res.status(400).json({
+          success: false,
+          message: "Checkout session does not match the payment"
+        });
+      }
+      verifiedUserId = tokenPayload.userId;
+      verifiedItems = tokenPayload.items;
+    }
+
+    const existingOrder = await Order.findOne({ razorpayOrderId: razorpay_order_id });
+    if (existingOrder) {
+      return res.status(200).json({
+        success: true,
+        message: "Order was already created",
+        orderId: existingOrder.orderId,
+        order: {
+          _id: existingOrder._id,
+          orderId: existingOrder.orderId,
+          status: existingOrder.status,
+          totalAmount: existingOrder.totalAmount,
+          paymentMethod: existingOrder.paymentMethod,
+          createdAt: existingOrder.createdAt,
+          userEmail: existingOrder.userEmail,
+          userName: existingOrder.userName,
+          emailSent: existingOrder.emailSent || false
+        }
+      });
+    }
+
     // Prepare user details
-    let userEmail = email;
-    let userName = pickCustomerName({ name: requestedUserName || fullName || customerName || name, email });
+    let userEmail = resolvedEmail;
+    let userName = pickCustomerName({ name: resolvedName, email: resolvedEmail });
     let isGuest = false;
 
-    if (userId.startsWith('guest_')) {
+    if (String(verifiedUserId).startsWith('guest_')) {
       console.log("Processing guest order");
       isGuest = true;
-      userName = pickCustomerName({ name: requestedUserName || fullName || customerName || name, email }, userName) || getEmailLocalPart(email) || 'Customer';
+      userName = pickCustomerName({ name: resolvedName, email: resolvedEmail }, userName) || getEmailLocalPart(resolvedEmail) || 'Customer';
     } else {
       try {
-        const user = await Admin.findById(userId);
+        const user = await Admin.findById(verifiedUserId);
         if (user) {
-          userEmail = user.email || email;
+          userEmail = user.email || resolvedEmail;
           userName = pickCustomerName(
-            { name: requestedUserName || fullName || customerName || name, email: userEmail },
+            { name: resolvedName, email: userEmail },
             { name: user.name, email: userEmail }
           ) || getEmailLocalPart(userEmail) || 'Customer';
         } else {
           isGuest = true;
-          userName = pickCustomerName({ name: requestedUserName || fullName || customerName || name, email }) || getEmailLocalPart(email) || 'Customer';
+          userName = pickCustomerName({ name: resolvedName, email: resolvedEmail }) || getEmailLocalPart(resolvedEmail) || 'Customer';
         }
       } catch (error) {
         console.error("Error fetching user:", error.message);
         isGuest = true;
-        userName = userName || getEmailLocalPart(email) || 'Customer';
+        userName = userName || getEmailLocalPart(resolvedEmail) || 'Customer';
       }
     }
 
     // Prepare phone number
-    let formattedPhone = phone.toString().trim();
+    let formattedPhone = resolvedPhone.toString().trim();
     formattedPhone = formattedPhone.replace(/^\+91/, '').replace(/^91/, '');
     if (!/^\d{10}$/.test(formattedPhone)) {
       return res.status(400).json({
@@ -1109,7 +1523,7 @@ router.post('/verifyPayment', async (req, res) => {
 
     // Prepare items with media
     console.log("Preparing order items...");
-    const itemsWithMedia = await Promise.all(items.map(async (item) => {
+    const itemsWithMedia = await Promise.all(verifiedItems.map(async (item) => {
       let media = [];
       let productDetails = {};
       
@@ -1144,22 +1558,23 @@ router.post('/verifyPayment', async (req, res) => {
     console.log("Creating database order...");
     
     const orderData = {
-      userId: userId,
+      userId: verifiedUserId,
       userEmail: userEmail,
       userName: userName,
-      email: email,
+      email: resolvedEmail,
       items: itemsWithMedia,
-      address: address.toString().trim(),
+      address: resolvedAddress.toString().trim(),
       phone: formattedPhone,
-      totalAmount: parseFloat(totalAmount),
+      totalAmount: Number(razorpayOrderDetails?.amount || paymentDetails.amount) / 100,
       razorpayOrderId: razorpay_order_id,
       isGuest: isGuest,
+      paymentMethod: isCodPayment ? 'cod' : 'online',
       paymentInfo: {
         paymentId: razorpay_payment_id,
-        amount: parseFloat(totalAmount),
-        status: 'captured',
+        amount: Number(razorpayOrderDetails?.amount || paymentDetails.amount) / 100,
+        status: isCodPayment ? 'pending' : 'captured',
         method: paymentDetails.method,
-        capturedAt: new Date(),
+        ...(isCodPayment ? {} : { capturedAt: new Date() }),
         updatedAt: new Date()
       },
       status: 'Pending',
@@ -1220,7 +1635,7 @@ router.post('/verifyPayment', async (req, res) => {
         internalId: savedOrder._id,
         razorpayOrderId: razorpay_order_id,
         razorpayPaymentId: razorpay_payment_id,
-        userId: userId,
+        userId: verifiedUserId,
         totalAmount: totalAmount,
         emailSent: savedOrder.emailSent || false
       });
@@ -1238,6 +1653,7 @@ router.post('/verifyPayment', async (req, res) => {
         orderId: savedOrder.orderId,
         status: savedOrder.status,
         totalAmount: savedOrder.totalAmount,
+        paymentMethod: savedOrder.paymentMethod,
         createdAt: savedOrder.createdAt,
         userEmail: savedOrder.userEmail,
         userName: savedOrder.userName,
