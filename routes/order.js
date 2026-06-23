@@ -1079,8 +1079,9 @@ const sendMagicCheckoutShippingInfo = (req, res) => {
       const addrServiceable = ['IN', 'IND', 'INDIA'].includes(country) && /^\d{6}$/.test(zipcode);
 
       return {
-        ...address,
         id: String(address?.id ?? index),
+        zipcode,
+        country,
         shipping_methods: [{
           id: 'standard-delivery',
           name: 'Standard Delivery',
