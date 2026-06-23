@@ -1001,14 +1001,51 @@ const sendMagicCheckoutShippingInfo = (req, res) => {
     address?.postal_code ||
     address?.pincode ||
     address?.pin_code ||
+    address?.zip ||
+    address?.pin ||
     ''
   );
+
+  const flattenObject = (value, prefix = '', output = {}) => {
+    if (!value || typeof value !== 'object') return output;
+
+    Object.entries(value).forEach(([key, nestedValue]) => {
+      const path = prefix ? `${prefix}.${key}` : key;
+      if (nestedValue && typeof nestedValue === 'object' && !Array.isArray(nestedValue)) {
+        flattenObject(nestedValue, path, output);
+        return;
+      }
+      output[path] = nestedValue;
+    });
+
+    return output;
+  };
+
+  const pickAddressFromFlatPayload = (source) => {
+    const flat = flattenObject(source);
+    const address = {};
+
+    Object.entries(flat).forEach(([key, value]) => {
+      const normalizedKey = key.toLowerCase().replace(/[^a-z0-9]/g, '');
+      if (['zipcode', 'postalcode', 'pincode', 'pin', 'zip'].includes(normalizedKey)) {
+        address.zipcode = value;
+      } else if (normalizedKey.endsWith('zipcode') || normalizedKey.endsWith('postalcode') || normalizedKey.endsWith('pincode')) {
+        address.zipcode = value;
+      } else if (normalizedKey.endsWith('country')) {
+        address.country = value;
+      } else if (normalizedKey.endsWith('id') && !address.id) {
+        address.id = value;
+      }
+    });
+
+    return readZipcode(address) ? address : null;
+  };
 
   const collectBracketAddresses = (source) => {
     const collected = {};
 
     Object.entries(source || {}).forEach(([key, value]) => {
-      const match = key.match(/^addresses\[(\d+)\]\[(\w+)\]$/);
+      const match = key.match(/^(?:addresses|shipping_address|billing_address)\[(\d+)\]\[(\w+)\]$/);
       if (!match) return;
       const [, index, field] = match;
       collected[index] = {
@@ -1021,13 +1058,16 @@ const sendMagicCheckoutShippingInfo = (req, res) => {
   };
 
   const parseAddresses = (value) => {
-    if (Array.isArray(value)) return value;
+    if (Array.isArray(value)) return value.filter(address => address && typeof address === 'object');
     if (!value) return [];
 
     try {
       const parsed = typeof value === 'string' ? JSON.parse(value) : value;
-      if (Array.isArray(parsed)) return parsed;
-      if (parsed && typeof parsed === 'object') return Object.values(parsed);
+      if (Array.isArray(parsed)) return parsed.filter(address => address && typeof address === 'object');
+      if (parsed && typeof parsed === 'object') {
+        if (readZipcode(parsed) || parsed.country || parsed.id) return [parsed];
+        return Object.values(parsed).filter(address => address && typeof address === 'object');
+      }
     } catch (_) {
       return [];
     }
@@ -1035,15 +1075,69 @@ const sendMagicCheckoutShippingInfo = (req, res) => {
     return [];
   };
 
-  const addresses = [
+  const parsedAddresses = [
     ...parseAddresses(req.body?.addresses),
     ...parseAddresses(req.query?.addresses),
+    ...parseAddresses(req.body?.shipping_addresses),
+    ...parseAddresses(req.query?.shipping_addresses),
+    ...parseAddresses(req.body?.shipping_address),
+    ...parseAddresses(req.query?.shipping_address),
     ...collectBracketAddresses(req.body),
-    ...collectBracketAddresses(req.query)
-  ].filter((address, index, all) => {
-    const key = `${address?.id ?? index}:${readZipcode(address)}`;
+    ...collectBracketAddresses(req.query),
+    pickAddressFromFlatPayload(req.body),
+    pickAddressFromFlatPayload(req.query)
+  ].filter(address => address && typeof address === 'object');
+
+  const addresses = (parsedAddresses.length ? parsedAddresses : [{ id: 'default', country: 'IN' }]).filter((address, index, all) => {
+    const zipcode = String(readZipcode(address)).trim();
+    const country = String(address?.country || 'IN').trim().toUpperCase();
+    const key = zipcode ? `${zipcode}:${country}` : `${address?.id ?? index}:${country}`;
     return all.findIndex((candidate, candidateIndex) =>
-      `${candidate?.id ?? candidateIndex}:${readZipcode(candidate)}` === key
+      (String(readZipcode(candidate)).trim()
+        ? `${String(readZipcode(candidate)).trim()}:${String(candidate?.country || 'IN').trim().toUpperCase()}`
+        : `${candidate?.id ?? candidateIndex}:${String(candidate?.country || 'IN').trim().toUpperCase()}`
+      ) === key
+    ) === index;
+  }).map((address, index) => ({
+    id: String(address?.id ?? index),
+    ...address,
+    country: address?.country || 'IN'
+  }));
+
+  const makeShippingMethod = (serviceable) => ({
+    id: 'standard-delivery',
+    name: 'Standard Delivery',
+    description: serviceable
+      ? 'Free standard delivery across India'
+      : 'Delivery is available only for valid Indian pincodes',
+    serviceable,
+    shipping_fee: 0,
+    shipping_amount: 0,
+    amount: 0,
+    cod: serviceable,
+    cod_fee: 0
+  });
+
+  const addressResponses = addresses.map((address, index) => {
+    const zipcode = String(readZipcode(address)).trim();
+    const country = String(address?.country || 'IN').trim().toUpperCase();
+    const hasZipcode = zipcode.length > 0;
+    const addrServiceable = ['IN', 'IND', 'INDIA'].includes(country) && (!hasZipcode || /^\d{6}$/.test(zipcode));
+    const shippingMethod = makeShippingMethod(addrServiceable);
+
+    return {
+      id: String(address?.id ?? index),
+      zipcode,
+      country,
+      serviceable: addrServiceable,
+      shipping_methods: [shippingMethod],
+      shipping_options: [shippingMethod],
+      shipping_rate: shippingMethod
+    };
+  }).filter((address, index, all) => {
+    const key = address.zipcode ? `${address.zipcode}:${address.country}` : `${address.id}:${address.country}`;
+    return all.findIndex(candidate =>
+      (candidate.zipcode ? `${candidate.zipcode}:${candidate.country}` : `${candidate.id}:${candidate.country}`) === key
     ) === index;
   });
 
@@ -1055,43 +1149,12 @@ const sendMagicCheckoutShippingInfo = (req, res) => {
     Expires: '0'
   });
 
-  const firstAddress = addresses[0];
-  const firstZipcode = firstAddress ? String(readZipcode(firstAddress)).trim() : '';
-  const firstCountry = firstAddress ? String(firstAddress?.country || 'IN').trim().toUpperCase() : 'IN';
-  const serviceable = ['IN', 'IND', 'INDIA'].includes(firstCountry) && /^\d{6}$/.test(firstZipcode);
-
-  const methods = [{
-    id: 'standard-delivery',
-    name: 'Standard Delivery',
-    description: serviceable
-      ? 'Free standard delivery across India'
-      : 'Delivery is available only for valid Indian pincodes',
-    serviceable,
-    shipping_fee: 0,
-    cod: serviceable,
-    cod_fee: 0
-  }];
+  const defaultMethod = makeShippingMethod(true);
 
   const responseBody = {
-    addresses: addresses.map((address, index) => {
-      const zipcode = String(readZipcode(address)).trim();
-      const country = String(address?.country || 'IN').trim().toUpperCase();
-      const addrServiceable = ['IN', 'IND', 'INDIA'].includes(country) && /^\d{6}$/.test(zipcode);
-
-      return {
-        id: String(address?.id ?? index),
-        zipcode,
-        country,
-        shipping_methods: [{
-          id: 'standard-delivery',
-          name: 'Standard Delivery',
-          serviceable: addrServiceable,
-          shipping_fee: 0,
-          cod: addrServiceable,
-          cod_fee: 0
-        }]
-      };
-    })
+    addresses: addressResponses,
+    shipping_methods: [defaultMethod],
+    shipping_options: [defaultMethod]
   };
 
   console.log('Responding with status 200. Body:', JSON.stringify(responseBody, null, 2));
