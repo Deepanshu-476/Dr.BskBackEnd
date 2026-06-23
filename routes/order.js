@@ -989,6 +989,37 @@ router.post('/orders/link-guest-orders', async (req, res) => {
 // Public callback configured in Razorpay Magic Checkout:
 // https://drbskhealthcare.com/api/payment/shipping-info
 const sendMagicCheckoutShippingInfo = (req, res) => {
+  console.log('============ MAGIC CHECKOUT SHIPPING INFO API HIT ============');
+  console.log('Timestamp:', new Date().toISOString());
+  console.log('Headers:', JSON.stringify(req.headers, null, 2));
+  console.log('Query:', JSON.stringify(req.query, null, 2));
+  console.log('Body:', JSON.stringify(req.body, null, 2));
+
+  const readZipcode = (address) => (
+    address?.zipcode ||
+    address?.zip_code ||
+    address?.postal_code ||
+    address?.pincode ||
+    address?.pin_code ||
+    ''
+  );
+
+  const collectBracketAddresses = (source) => {
+    const collected = {};
+
+    Object.entries(source || {}).forEach(([key, value]) => {
+      const match = key.match(/^addresses\[(\d+)\]\[(\w+)\]$/);
+      if (!match) return;
+      const [, index, field] = match;
+      collected[index] = {
+        ...(collected[index] || {}),
+        [field]: value
+      };
+    });
+
+    return Object.values(collected);
+  };
+
   const parseAddresses = (value) => {
     if (Array.isArray(value)) return value;
     if (!value) return [];
@@ -1006,19 +1037,17 @@ const sendMagicCheckoutShippingInfo = (req, res) => {
 
   const addresses = [
     ...parseAddresses(req.body?.addresses),
-    ...parseAddresses(req.query?.addresses)
+    ...parseAddresses(req.query?.addresses),
+    ...collectBracketAddresses(req.body),
+    ...collectBracketAddresses(req.query)
   ].filter((address, index, all) => {
-    const key = `${address?.id ?? index}:${address?.zipcode ?? ''}`;
+    const key = `${address?.id ?? index}:${readZipcode(address)}`;
     return all.findIndex((candidate, candidateIndex) =>
-      `${candidate?.id ?? candidateIndex}:${candidate?.zipcode ?? ''}` === key
+      `${candidate?.id ?? candidateIndex}:${readZipcode(candidate)}` === key
     ) === index;
   });
 
-  console.log('Magic Checkout shipping info request:', {
-    orderId: req.body?.order_id || req.query?.order_id,
-    razorpayOrderId: req.body?.razorpay_order_id || req.query?.razorpay_order_id,
-    addresses
-  });
+  console.log('Parsed addresses:', JSON.stringify(addresses, null, 2));
 
   res.set({
     'Cache-Control': 'no-store, no-cache, must-revalidate, proxy-revalidate',
@@ -1026,30 +1055,48 @@ const sendMagicCheckoutShippingInfo = (req, res) => {
     Expires: '0'
   });
 
-  return res.status(200).json({
+  const firstAddress = addresses[0];
+  const firstZipcode = firstAddress ? String(readZipcode(firstAddress)).trim() : '';
+  const firstCountry = firstAddress ? String(firstAddress?.country || 'IN').trim().toUpperCase() : 'IN';
+  const serviceable = ['IN', 'IND', 'INDIA'].includes(firstCountry) && /^\d{6}$/.test(firstZipcode);
+
+  const methods = [{
+    id: 'standard-delivery',
+    name: 'Standard Delivery',
+    description: serviceable
+      ? 'Free standard delivery across India'
+      : 'Delivery is available only for valid Indian pincodes',
+    serviceable,
+    shipping_fee: 0,
+    cod: serviceable,
+    cod_fee: 0
+  }];
+
+  const responseBody = {
     addresses: addresses.map((address, index) => {
-      const zipcode = String(address?.zipcode || '').trim();
+      const zipcode = String(readZipcode(address)).trim();
       const country = String(address?.country || 'IN').trim().toUpperCase();
-      const serviceable = ['IN', 'IND', 'INDIA'].includes(country) && /^\d{6}$/.test(zipcode);
+      const addrServiceable = ['IN', 'IND', 'INDIA'].includes(country) && /^\d{6}$/.test(zipcode);
 
       return {
+        ...address,
         id: String(address?.id ?? index),
-        zipcode,
-        country,
         shipping_methods: [{
           id: 'standard-delivery',
           name: 'Standard Delivery',
-          description: serviceable
-            ? 'Free standard delivery across India'
-            : 'Delivery is available only for valid Indian pincodes',
-          serviceable,
+          serviceable: addrServiceable,
           shipping_fee: 0,
-          cod: serviceable,
+          cod: addrServiceable,
           cod_fee: 0
         }]
       };
     })
-  });
+  };
+
+  console.log('Responding with status 200. Body:', JSON.stringify(responseBody, null, 2));
+  console.log('================================================================');
+
+  return res.status(200).json(responseBody);
 };
 
 router.get('/payment/shipping-info', sendMagicCheckoutShippingInfo);
