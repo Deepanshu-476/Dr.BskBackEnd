@@ -399,20 +399,24 @@
 
         const statusMessage = document.getElementById("status-message");
         const statusBox = document.getElementById("status-box");
+        const btnOpenApp = document.getElementById("btn-open-app");
         const btnStoreAction = document.getElementById("btn-store-action");
         const btnStoreText = document.getElementById("btn-store-text");
         const desktopSection = document.getElementById("desktop-section");
 
         let targetStoreUrl = androidStoreUrl; // default
+        const intentUrl = `intent://product/{{PRODUCT_ID}}#Intent;scheme=drbsk;package=com.cupid_cakes;S.browser_fallback_url=${encodeURIComponent(androidStoreUrl)};end`;
         
         if (isAndroid) {
             targetStoreUrl = androidStoreUrl;
             btnStoreText.textContent = "Download from Play Store";
             btnStoreAction.href = androidStoreUrl;
+            btnOpenApp.href = intentUrl;
         } else if (isIOS) {
             targetStoreUrl = iosStoreUrl;
             btnStoreText.textContent = "Download from App Store";
             btnStoreAction.href = iosStoreUrl;
+            btnOpenApp.href = appSchemeUrl;
         } else {
             // Desktop
             statusBox.style.display = "none";
@@ -422,17 +426,20 @@
 
         // Only redirect automatically if on mobile
         if (isAndroid || isIOS) {
-            // 1. Attempt to open in app instantly using custom scheme
-            window.location.href = appSchemeUrl;
+            // 1. Attempt to open in app instantly
+            if (isAndroid) {
+                window.location.href = intentUrl;
+            } else {
+                window.location.href = appSchemeUrl;
+            }
 
             // 2. Set timeout fallback to App Store / Play Store
             const startTime = Date.now();
             setTimeout(function() {
                 // If user was successfully redirected to the native app, the page will go background/blur
                 // and the difference between now and startTime will be large, or document.hidden will be true.
-                // We also check document.hidden to avoid double-redirecting if the user left the browser.
                 if (Date.now() - startTime < 2000 && !document.hidden) {
-                    statusMessage.textContent = "Redirecting to App Store...";
+                    statusMessage.textContent = isAndroid ? "Redirecting to Play Store..." : "Redirecting to App Store...";
                     setTimeout(() => {
                         window.location.href = targetStoreUrl;
                     }, 500);
