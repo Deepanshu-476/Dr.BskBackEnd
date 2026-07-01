@@ -18,7 +18,7 @@ const wholesalePartnerSchema = new mongoose.Schema({
   state: { type: String },
   zipcode: { type: String },
   country: { type: String },
-  billingEmail: { type: String },
+  billingEmail: { type: String, trim: true, lowercase: true },
   password: { type: String },
   status: { type: String, default: 'Pending' },
   createdAt: { type: Date, default: Date.now }

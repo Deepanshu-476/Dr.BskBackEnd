@@ -4,6 +4,11 @@ const Order = require('../models/order');
 const Admin = require('../models/admin');
 const Product = require('../models/product');
 const WholesalePartner = require('../models/wholeSale');
+const { optionalToken } = require('../middlewares/authMiddlewares');
+const {
+  applyProductPricing,
+  resolvePricingTier,
+} = require('../utils/productPricing');
 const { logger } = require("../utils/logger");
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
@@ -2587,10 +2592,11 @@ router.get('/order/:orderId', async (req, res) => {
 
 // In your backend route
 // routes/product.routes.js
-router.get('/productsBySubcategory', async (req, res) => {
+router.get('/productsBySubcategory', optionalToken, async (req, res) => {
   const requestStartTime = Date.now();
 
   try {
+    const pricingTier = await resolvePricingTier(req.user);
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     console.log("📥 /productsBySubcategory API HIT");
     console.log("🕒 Time:", new Date().toISOString());
@@ -2669,7 +2675,9 @@ router.get('/productsBySubcategory', async (req, res) => {
     console.log("⏱️ Total API Time:", `${totalTime} ms`);
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-    res.status(200).json(products);
+    res.status(200).json(
+      products.map(product => applyProductPricing(product, pricingTier))
+    );
 
   } catch (error) {
     console.error("🔥 SERVER ERROR OCCURRED");

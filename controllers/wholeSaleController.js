@@ -8,7 +8,24 @@ const bcrypt = require("bcryptjs");
 
 exports.createWholesalePartner = async (req, res) => {
   try {
-    const data = req.body;
+    const data = {
+      ...req.body,
+      billingEmail: String(req.body.billingEmail || "").trim().toLowerCase(),
+      phone: String(req.body.phone || "").trim()
+    };
+
+    const existingPartner = await WholesalePartner.findOne({
+      $or: [
+        { billingEmail: data.billingEmail },
+        ...(data.phone ? [{ phone: data.phone }] : [])
+      ]
+    });
+    if (existingPartner) {
+      return res.status(409).json({
+        success: false,
+        message: "Wholesale partner is already registered"
+      });
+    }
 
     // Hash the password before saving
     if (data.password) {

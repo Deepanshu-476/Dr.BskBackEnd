@@ -27,8 +27,24 @@ otpSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 const OTP = mongoose.models.OTP || mongoose.model('OTP', otpSchema);
 
+const normalizeEmail = (email = "") => String(email).trim().toLowerCase();
+const escapeRegex = (value = "") =>
+  String(value).replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+const findAdminByEmail = (email) =>
+  Admin.findOne({
+    email: { $regex: new RegExp(`^${escapeRegex(normalizeEmail(email))}$`, "i") }
+  });
+
+const findWholesaleByEmail = (email) =>
+  WholesalePartner.findOne({
+    billingEmail: {
+      $regex: new RegExp(`^${escapeRegex(normalizeEmail(email))}$`, "i")
+    }
+  });
+
 const findUser = async (email) => {
-  const admin = await Admin.findOne({ email });
+  const admin = await findAdminByEmail(email);
   if (admin) return { type: "admins", user: admin };
   return null;
 };
@@ -36,7 +52,8 @@ const findUser = async (email) => {
 // Send OTP function
 const sendOtp = async (req, res) => {
   try {
-    const { email, phone } = req.body;
+    const email = normalizeEmail(req.body.email);
+    const { phone } = req.body;
     
     if (!email && !phone) {
       return res.status(400).json({ message: 'Email or phone is required' });
@@ -46,9 +63,9 @@ const sendOtp = async (req, res) => {
     const expiresAt = new Date(Date.now() + 10 * 60 * 1000);
     
     if (email) {
-      let user = await Admin.findOne({ email });
+      let user = await findAdminByEmail(email);
       if (!user) {
-        user = await WholesalePartner.findOne({ billingEmail: email });
+        user = await findWholesaleByEmail(email);
         if (!user) {
           return res.status(404).json({ message: 'Email not registered' });
         }
@@ -133,7 +150,8 @@ const sendSmsOtp = async (phone, otp) => {
 
 const loginWithOtp = async (req, res) => {
   try {
-    const { email, phone, otp } = req.body;
+    const email = normalizeEmail(req.body.email);
+    const { phone, otp } = req.body;
     
     if ((!email && !phone) || !otp) {
       return res.status(400).json({ 
@@ -161,11 +179,11 @@ const loginWithOtp = async (req, res) => {
     
     let user, type;
     if (email) {
-      user = await Admin.findOne({ email });
+      user = await findAdminByEmail(email);
       type = 'admin';
       
       if (!user) {
-        user = await WholesalePartner.findOne({ billingEmail: email });
+        user = await findWholesaleByEmail(email);
         type = 'wholesalePartner';
       }
     } else {
@@ -286,13 +304,14 @@ const handleFileSizeError = (err, req, res, next) => {
 
 const adminLogin = async (req, res) => {
   try {
-    const { email, password, location, ipAddress, phone } = req.body;
+    const email = normalizeEmail(req.body.email);
+    const { password, location, ipAddress, phone } = req.body;
 
-    let user = await Admin.findOne({ email });
+    let user = await findAdminByEmail(email);
     let type = 'admin';
 
     if (!user) {
-      user = await WholesalePartner.findOne({ billingEmail: email });
+      user = await findWholesaleByEmail(email);
       type = 'wholesalePartner';
     }
 
@@ -567,7 +586,9 @@ const readAllAdmins = async (req, res) => {
 
     // CASE 1: getAll=true - Return ALL users without pagination
     if (getAll === 'true' || getAll === true) {
-      const admins = await Admin.find(searchFilter).sort({ createdAt: -1 });
+      const admins = await Admin.find(searchFilter)
+        .select("-password")
+        .sort({ createdAt: -1 });
       const totalCount = admins.length;
 
       logger.info(`All admins fetched successfully. Total: ${totalCount}`);
@@ -582,7 +603,9 @@ const readAllAdmins = async (req, res) => {
 
     // CASE 2: No page/limit params - Return ALL users (default behavior)
     if (!page && !limit) {
-      const admins = await Admin.find(searchFilter).sort({ createdAt: -1 });
+      const admins = await Admin.find(searchFilter)
+        .select("-password")
+        .sort({ createdAt: -1 });
       const totalCount = admins.length;
 
       return res.status(200).json({
@@ -599,6 +622,7 @@ const readAllAdmins = async (req, res) => {
 
     const totalCount = await Admin.countDocuments(searchFilter);
     const admins = await Admin.find(searchFilter)
+      .select("-password")
       .sort({ createdAt: -1 })
       .skip((pageNumber - 1) * limitNumber)
       .limit(limitNumber);

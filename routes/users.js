@@ -10,6 +10,7 @@ const prescriptionController = require("../controllers/prescriptionController");
 
 
 const tokenRequired = require("../middlewares/authMiddlewares");
+const { optionalToken } = require("../middlewares/authMiddlewares");
 const upload = require("../middlewares/uploadMiddleware");
 
 router.post(
@@ -19,9 +20,9 @@ router.post(
   productController.createProduct
 );
 router.get("/products/xml", productController.getAllProductsXML);
-router.get("/allproducts", productController.getAllProducts);
-router.get("/product/:id", productController.getProductById);
-router.get("/product/slug/:slug", productController.getProductBySlug);
+router.get("/allproducts", optionalToken, productController.getAllProducts);
+router.get("/product/:id", optionalToken, productController.getProductById);
+router.get("/product/slug/:slug", optionalToken, productController.getProductBySlug);
 router.put(
   "/updateProduct/:id",
   productController.upload.array('media', 10),
@@ -29,12 +30,12 @@ router.put(
   productController.updateProduct
 );
 router.delete("/deleteProduct/:id", productController.deleteProduct);
-router.get("/search", productController.searchProducts);
+router.get("/search", optionalToken, productController.searchProducts);
 router.get("/totalProductcount", productController.getProductCount);
 
 router.post("/createnewArrival", newarrivalController.createNewArrivalProduct);
-router.get("/allnewarrivalproducts", newarrivalController.getAllNewArrivalProducts);
-router.get("/newarrivalproduct/:id", newarrivalController.getNewArrivalProductById);
+router.get("/allnewarrivalproducts", optionalToken, newarrivalController.getAllNewArrivalProducts);
+router.get("/newarrivalproduct/:id", optionalToken, newarrivalController.getNewArrivalProductById);
 router.put("/updatenewArrivalProduct/:id", tokenRequired, newarrivalController.updateNewArrivalProduct);
 router.delete("/deletenewArrivalProduct/:id", tokenRequired, newarrivalController.deleteNewArrivalProduct);
 
