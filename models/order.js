@@ -69,6 +69,14 @@ const orderSchema = new mongoose.Schema({
     required: true,
     trim: true
   },
+  shippingAddress: {
+    line1: { type: String, trim: true },
+    line2: { type: String, trim: true },
+    city: { type: String, trim: true },
+    state: { type: String, trim: true },
+    zipcode: { type: String, trim: true },
+    country: { type: String, trim: true, default: 'India' }
+  },
   phone: {
     type: String,
     required: true,
@@ -165,6 +173,20 @@ const orderSchema = new mongoose.Schema({
   // Delivery tracking
   trackingNumber: { type: String, default: null },
   courierName: { type: String, default: null },
+  shippingInfo: {
+    provider: { type: String, default: null },
+    status: {
+      type: String,
+      enum: ['not_created', 'created', 'failed'],
+      default: 'not_created'
+    },
+    awb: { type: String, default: null },
+    pickupId: { type: String, default: null },
+    pickupError: { type: String, default: null },
+    error: { type: String, default: null },
+    createdAt: { type: Date },
+    lastAttemptAt: { type: Date }
+  },
   expectedDelivery: { type: Date },
   deliveredAt: { type: Date },
 

@@ -14,6 +14,43 @@ const Razorpay = require('razorpay');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const { getEmailLocalPart, isUsefulCustomerName, pickCustomerName } = require('../utils/customerName');
+const { createShipmentAndPickup } = require('../services/delhiveryService');
+
+const createDelhiveryShipmentForOrder = async (order) => {
+  try {
+    const delivery = await createShipmentAndPickup(order);
+    if (delivery.skipped) return order;
+
+    order.trackingNumber = delivery.waybill;
+    order.courierName = 'Delhivery';
+    order.shippingInfo = {
+      provider: 'Delhivery',
+      status: 'created',
+      awb: delivery.waybill,
+      pickupId: delivery.pickupId,
+      pickupError: delivery.pickupError,
+      error: null,
+      createdAt: new Date(),
+      lastAttemptAt: new Date()
+    };
+    await order.save();
+    console.log(`Delhivery shipment created. AWB: ${delivery.waybill}`);
+  } catch (error) {
+    const message = error.response?.data?.error ||
+      error.response?.data?.detail ||
+      error.message ||
+      'Delhivery shipment creation failed';
+    console.error('Delhivery shipment creation failed:', message);
+    order.shippingInfo = {
+      provider: 'Delhivery',
+      status: 'failed',
+      error: String(message).slice(0, 500),
+      lastAttemptAt: new Date()
+    };
+    await order.save();
+  }
+  return order;
+};
 
 // Debug middleware
 router.use((req, res, next) => {
@@ -1680,6 +1717,14 @@ router.post('/verifyPayment', async (req, res) => {
       email: resolvedEmail,
       items: itemsWithMedia,
       address: resolvedAddress.toString().trim(),
+      shippingAddress: {
+        line1: magicAddress.line1 || '',
+        line2: magicAddress.line2 || '',
+        city: magicAddress.city || '',
+        state: magicAddress.state || '',
+        zipcode: magicAddress.zipcode || '',
+        country: magicAddress.country || 'India'
+      },
       phone: formattedPhone,
       totalAmount: Number(razorpayOrderDetails?.amount || paymentDetails.amount) / 100,
       razorpayOrderId: razorpay_order_id,
@@ -1706,6 +1751,8 @@ router.post('/verifyPayment', async (req, res) => {
       const newOrder = new Order(orderData);
       savedOrder = await newOrder.save();
       console.log("✅ Order created in database:", savedOrder._id);
+
+      await createDelhiveryShipmentForOrder(savedOrder);
       
       // ✅ SEND EMAIL HERE - After order is successfully saved
       try {
