@@ -8,7 +8,7 @@ router.get('/cash-on-delivery', async (req, res) => {
     let settings = await PaymentSettings.findOne();
 
     if (!settings) {
-      settings = await PaymentSettings.create({ codEnabled: true });
+      settings = await PaymentSettings.create({ codEnabled: false });
     }
 
     res.json({ success: true, data: settings });
@@ -25,9 +25,9 @@ router.put('/Updated-COD', async (req, res) => {
     let settings = await PaymentSettings.findOne();
 
     if (!settings) {
-      settings = await PaymentSettings.create({ codEnabled });
+      settings = await PaymentSettings.create({ codEnabled: Boolean(codEnabled) });
     } else {
-      settings.codEnabled = codEnabled;
+      settings.codEnabled = Boolean(codEnabled);
       await settings.save();
     }
 

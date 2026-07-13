@@ -1,9 +1,5 @@
 const Product = require("../models/product");
 const { logger } = require("../utils/logger");
-const {
-  applyProductPricing,
-  resolvePricingTier,
-} = require("../utils/productPricing");
 const BASE_URL = "https://drbskhealthcare.com";
 
 const multer = require("multer");
@@ -127,16 +123,13 @@ const slugify = (text) => {
 // Get all products
 exports.getAllProducts = async (req, res) => {
   try {
-    const pricingTier = await resolvePricingTier(req.user);
     const products = await Product.find({
         deleted_at: null,
         category: { $ne: null }
       });
 
     logger.info(`Fetched ${products.length} products`);
-    res.status(200).json(
-      products.map((product) => applyProductPricing(product, pricingTier))
-    );
+    res.status(200).json(products);
   } catch (error) {
     logger.error("Error fetching all products:", error);
     res.status(500).json({ message: error.message });
@@ -278,14 +271,13 @@ res.send(xml);
 // Get a single product by ID
 exports.getProductById = async (req, res) => {
   try {
-    const pricingTier = await resolvePricingTier(req.user);
     const product = await Product.findById(req.params.id);
 
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    res.status(200).json(applyProductPricing(product, pricingTier));
+    res.status(200).json(product);
   } catch (error) {
     console.error("GET PRODUCT ERROR:", error);
     res.status(500).json({ message: error.message });
@@ -506,7 +498,6 @@ exports.getProductCount = async (req, res) => {
 // Search products by name and suggest similar products
 exports.searchProducts = async (req, res) => {
   try {
-    const pricingTier = await resolvePricingTier(req.user);
     const { query } = req.query;
 
     if (!query || query.trim() === "") {
@@ -529,12 +520,8 @@ exports.searchProducts = async (req, res) => {
     logger.info(`Search query: "${query}", Matches: ${matchedProducts.length}, Suggestions: ${suggestedProducts.length}`);
 
     res.status(200).json({
-      results: matchedProducts.map((product) =>
-        applyProductPricing(product, pricingTier)
-      ),
-      suggestions: suggestedProducts.map((product) =>
-        applyProductPricing(product, pricingTier)
-      )
+      results: matchedProducts,
+      suggestions: suggestedProducts
     });
   } catch (error) {
     logger.error("Error searching products:", error);
@@ -544,14 +531,13 @@ exports.searchProducts = async (req, res) => {
 
 exports.getProductBySlug = async (req, res) => {
   try {
-    const pricingTier = await resolvePricingTier(req.user);
     const product = await Product.findOne({ slug: req.params.slug });
 
     if (!product) {
       return res.status(404).json({ message: "Product not found" });
     }
 
-    res.status(200).json(applyProductPricing(product, pricingTier));
+    res.status(200).json(product);  
   } catch (error) {
     console.error("GET PRODUCT BY SLUG ERROR:", error);
     res.status(500).json({ message: error.message });

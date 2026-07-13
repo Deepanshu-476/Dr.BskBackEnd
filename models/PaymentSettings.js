@@ -3,7 +3,7 @@ const mongoose = require('mongoose');
 const paymentSettingsSchema = new mongoose.Schema({
   codEnabled: {
     type: Boolean,
-    default: true
+    default: false
   }
 }, { timestamps: true });
 

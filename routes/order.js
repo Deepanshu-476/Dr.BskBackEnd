@@ -4,17 +4,23 @@ const Order = require('../models/order');
 const Admin = require('../models/admin');
 const Product = require('../models/product');
 const WholesalePartner = require('../models/wholeSale');
-const { optionalToken } = require('../middlewares/authMiddlewares');
-const {
-  applyProductPricing,
-  resolvePricingTier,
-} = require('../utils/productPricing');
+const PaymentSettings = require('../models/PaymentSettings');
 const { logger } = require("../utils/logger");
 const Razorpay = require('razorpay');
 const crypto = require('crypto');
 const nodemailer = require('nodemailer');
 const { getEmailLocalPart, isUsefulCustomerName, pickCustomerName } = require('../utils/customerName');
 const { createShipmentAndPickup } = require('../services/delhiveryService');
+
+const isCodEnabled = async () => {
+  try {
+    const settings = await PaymentSettings.findOne().lean();
+    return Boolean(settings?.codEnabled);
+  } catch (error) {
+    console.error('Failed to read COD setting:', error.message);
+    return false;
+  }
+};
 
 const createDelhiveryShipmentForOrder = async (order) => {
   try {
@@ -1030,7 +1036,7 @@ router.post('/orders/link-guest-orders', async (req, res) => {
 
 // Public callback configured in Razorpay Magic Checkout:
 // https://drbskhealthcare.com/api/payment/shipping-info
-const sendMagicCheckoutShippingInfo = (req, res) => {
+const sendMagicCheckoutShippingInfo = async (req, res) => {
   console.log('============ MAGIC CHECKOUT SHIPPING INFO API HIT ============');
   console.log('Timestamp:', new Date().toISOString());
   console.log('Headers:', JSON.stringify(req.headers, null, 2));
@@ -1146,6 +1152,8 @@ const sendMagicCheckoutShippingInfo = (req, res) => {
     country: address?.country || 'IN'
   }));
 
+  const codEnabled = await isCodEnabled();
+
   const makeShippingMethod = (serviceable) => ({
     id: 'standard-delivery',
     name: 'Standard Delivery',
@@ -1156,7 +1164,7 @@ const sendMagicCheckoutShippingInfo = (req, res) => {
     shipping_fee: 0,
     shipping_amount: 0,
     amount: 0,
-    cod: serviceable,
+    cod: codEnabled && serviceable,
     cod_fee: 0
   });
 
@@ -1523,7 +1531,16 @@ router.post('/verifyPayment', async (req, res) => {
       });
     }
 
+    const codEnabled = await isCodEnabled();
+    if (paymentDetails.method === 'cod' && !codEnabled) {
+      return res.status(400).json({
+        success: false,
+        message: 'Cash on Delivery is currently disabled'
+      });
+    }
+
     const isCodPayment =
+      codEnabled &&
       paymentDetails.method === 'cod' &&
       ['pending', 'authorized', 'captured'].includes(paymentDetails.status);
 
@@ -2639,11 +2656,10 @@ router.get('/order/:orderId', async (req, res) => {
 
 // In your backend route
 // routes/product.routes.js
-router.get('/productsBySubcategory', optionalToken, async (req, res) => {
+router.get('/productsBySubcategory', async (req, res) => {
   const requestStartTime = Date.now();
 
   try {
-    const pricingTier = await resolvePricingTier(req.user);
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━");
     console.log("📥 /productsBySubcategory API HIT");
     console.log("🕒 Time:", new Date().toISOString());
@@ -2722,9 +2738,7 @@ router.get('/productsBySubcategory', optionalToken, async (req, res) => {
     console.log("⏱️ Total API Time:", `${totalTime} ms`);
     console.log("━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n");
 
-    res.status(200).json(
-      products.map(product => applyProductPricing(product, pricingTier))
-    );
+    res.status(200).json(products);
 
   } catch (error) {
     console.error("🔥 SERVER ERROR OCCURRED");
@@ -2742,6 +2756,13 @@ router.post('/createCOD', async (req, res) => {
   console.log("Request body:", JSON.stringify(req.body, null, 2));
 
   try {
+    if (!(await isCodEnabled())) {
+      return res.status(403).json({
+        success: false,
+        message: 'Cash on Delivery is currently disabled'
+      });
+    }
+
     const {
       userId,
       items,
@@ -2756,6 +2777,14 @@ router.post('/createCOD', async (req, res) => {
       fullName,
       customerName,
       name,
+      shippingAddress,
+      line1,
+      line2,
+      city,
+      state,
+      zipcode,
+      pincode,
+      country,
       productName,
       productImage,
       paymentMethod,
@@ -2894,6 +2923,14 @@ router.post('/createCOD', async (req, res) => {
       email: email,
       items: itemsWithMedia,
       address: address.toString().trim(),
+      shippingAddress: {
+        line1: shippingAddress?.line1 || line1 || address || '',
+        line2: shippingAddress?.line2 || line2 || '',
+        city: shippingAddress?.city || city || '',
+        state: shippingAddress?.state || state || '',
+        zipcode: shippingAddress?.zipcode || shippingAddress?.pincode || zipcode || pincode || '',
+        country: shippingAddress?.country || country || 'India'
+      },
       phone: formattedPhone,
       totalAmount: parseFloat(requestTotal.toFixed(2)), // Use frontend calculated total
       baseAmount: baseAmount ? parseFloat(baseAmount) : parseFloat(requestTotal) - calculatedCodCharge,
@@ -2943,6 +2980,8 @@ router.post('/createCOD', async (req, res) => {
         throw dbError;
       }
     }
+
+    await createDelhiveryShipmentForOrder(savedOrder);
 
     // Send confirmation email for COD order
     try {
