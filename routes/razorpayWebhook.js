@@ -67,6 +67,7 @@
 // const crypto = require('crypto');
 // const Order = require('../models/order');
 // const { logger } = require('../utils/logger');
+const PaymentSettings = require('../models/PaymentSettings');
 
 // const RAZORPAY_WEBHOOK_SECRET = process.env.RAZORPAY_WEBHOOK_SECRET;
 
@@ -348,14 +349,20 @@ router.post('/webhook', express.raw({ type: 'application/json' }), async (req, r
       return res.status(400).send('Missing signature header');
     }
 
-    if (!RAZORPAY_WEBHOOK_SECRET) {
+    let settings = await PaymentSettings.findOne();
+    if (!settings) {
+      settings = await PaymentSettings.create({});
+    }
+    const webhookSecret = settings.razorpayWebhookSecret || RAZORPAY_WEBHOOK_SECRET;
+
+    if (!webhookSecret) {
       console.log("Webhook secret not configured");
       return res.status(500).send('Webhook secret not configured');
     }
 
     // Verify webhook signature
     const expectedSignature = crypto
-      .createHmac('sha256', RAZORPAY_WEBHOOK_SECRET)
+      .createHmac('sha256', webhookSecret)
       .update(req.body, 'utf-8')
       .digest('hex');
 

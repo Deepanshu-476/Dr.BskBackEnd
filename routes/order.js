@@ -16,6 +16,300 @@ const nodemailer = require('nodemailer');
 const { getEmailLocalPart, isUsefulCustomerName, pickCustomerName } = require('../utils/customerName');
 const { createShipmentAndPickup } = require('../services/delhiveryService');
 
+const EmailSettings = require('../models/EmailSettings');
+const PaymentSettings = require('../models/PaymentSettings');
+
+// Helper to get the correct Razorpay instance dynamically from settings
+const getRazorpay = async () => {
+  try {
+    let settings = await PaymentSettings.findOne();
+    if (!settings) {
+      settings = await PaymentSettings.create({});
+    }
+
+    const keyId = settings.razorpayKeyId || process.env.RAZORPAY_KEY_ID;
+    const keySecret = settings.razorpayKeySecret || process.env.RAZORPAY_KEY_SECRET;
+
+    if (!keyId || !keySecret) {
+      console.warn("⚠️ Razorpay credentials not configured in settings or environment!");
+    }
+
+    const instance = new Razorpay({
+      key_id: keyId || 'placeholder_id',
+      key_secret: keySecret || 'placeholder_secret',
+    });
+
+    return { instance, keyId, keySecret, settings };
+  } catch (error) {
+    console.error("Error creating dynamic Razorpay instance:", error);
+    const instance = new Razorpay({
+      key_id: process.env.RAZORPAY_KEY_ID || 'placeholder_id',
+      key_secret: process.env.RAZORPAY_KEY_SECRET || 'placeholder_secret',
+    });
+    return {
+      instance,
+      keyId: process.env.RAZORPAY_KEY_ID || 'placeholder_id',
+      keySecret: process.env.RAZORPAY_KEY_SECRET || 'placeholder_secret',
+      settings: null
+    };
+  }
+};
+
+// Helper to get dynamic transporter and settings
+const getDynamicTransporter = async () => {
+  try {
+    let settings = await EmailSettings.findOne();
+    if (!settings) {
+      settings = await EmailSettings.create({});
+    }
+    
+    const smtpUser = settings.senderEmail || process.env.SMTP_USER || 'drbskhealthcare@gmail.com';
+    const smtpPass = settings.senderPassword || process.env.SMTP_PASS || 'yxnykcgxwtslcdtl';
+    
+    console.log("Creating dynamic transporter with email:", smtpUser);
+    
+    const dynamicTransporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
+      auth: {
+        user: smtpUser,
+        pass: smtpPass
+      },
+      tls: {
+        rejectUnauthorized: false
+      }
+    });
+    
+    return { transporter: dynamicTransporter, settings };
+  } catch (error) {
+    console.error("Error creating dynamic transporter, falling back to env:", error);
+    const fallbackTransporter = nodemailer.createTransport({
+      host: process.env.SMTP_HOST || 'smtp.gmail.com',
+      port: process.env.SMTP_PORT || 587,
+      secure: false,
+      auth: {
+        user: process.env.SMTP_USER,
+        pass: process.env.SMTP_PASS
+      },
+      tls: {
+        rejectUnauthorized: false
+      }
+    });
+    return { 
+      transporter: fallbackTransporter, 
+      settings: { 
+        senderEmail: process.env.SMTP_USER, 
+        ownerEmail: 'himanshujangra0633@gmail.com' 
+      } 
+    };
+  }
+};
+
+// Function to send order confirmation email dynamically
+const sendOrderConfirmationEmailDynamic = async (order, userEmail, userName, newUserDetails = null) => {
+  try {
+    const { transporter: dynamicTransporter, settings } = await getDynamicTransporter();
+    const displayOrderId = order.orderId || `BSK-O-${String(order._id).slice(-8).toUpperCase()}`;
+    const senderEmail = settings.senderEmail || 'drbskhealthcare@gmail.com';
+    const ownerEmail = settings.ownerEmail || 'himanshujangra0633@gmail.com';
+
+    let accountSectionText = '';
+    if (newUserDetails && newUserDetails.isNew) {
+      accountSectionText = `
+YOUR ACCOUNT HAS BEEN CREATED!
+We have automatically created an account for you using the email you provided at checkout.
+Username/Email: ${userEmail}
+Password: ${newUserDetails.password}
+You can log in and check your order details. We recommend changing your password after logging in.
+----------------------------------------
+      `;
+    } else {
+      accountSectionText = `
+ACCOUNT DETAILS
+Your order is linked to your account: ${userEmail}.
+You can log in to check order status and history.
+----------------------------------------
+      `;
+    }
+
+    const mailOptions = {
+      from: {
+        name: process.env.STORE_NAME || 'Dr BSK Healthcare',
+        address: senderEmail
+      },
+      to: userEmail,
+      subject: `Order Confirmation #${displayOrderId} - ${process.env.STORE_NAME || 'Dr BSK Healthcare'}`,
+      html: generateOrderEmailTemplate(order, { email: userEmail, name: userName }, newUserDetails),
+      text: `
+Order Confirmation #${displayOrderId}
+
+Dear ${userName || 'Customer'},
+
+Thank you for your order! We have received your order and it is being processed.
+
+${accountSectionText}
+
+ORDER DETAILS:
+Order ID: ${displayOrderId}
+Order Date: ${new Date(order.createdAt).toLocaleString()}
+Status: ${order.status}
+Total Amount: ₹${parseFloat(order.totalAmount).toFixed(2)}
+
+SHIPPING ADDRESS:
+${userName || 'Customer'}
+${order.address}
+Phone: ${order.phone}
+Email: ${userEmail}
+
+ORDER ITEMS:
+${order.items.map(item => `- ${item.name} x ${item.quantity}: ₹${parseFloat(item.price).toFixed(2)} each`).join('\n')}
+
+Total: ₹${parseFloat(order.totalAmount).toFixed(2)}
+
+Thank you for shopping with us!
+
+Best regards,
+${process.env.STORE_NAME || 'Dr BSK Healthcare Team'}
+      `
+    };
+
+    console.log(`Sending order confirmation email to customer: ${userEmail}`);
+    const info = await dynamicTransporter.sendMail(mailOptions);
+    console.log(`✅ Order confirmation email sent to customer: ${info.messageId}`);
+
+    // Send order notification email to owner
+    try {
+      console.log(`Sending order notification email to owner: ${ownerEmail}`);
+      const ownerMailOptions = {
+        from: {
+          name: 'Dr BSK System Alert',
+          address: senderEmail
+        },
+        to: ownerEmail,
+        subject: `New Order Alert: #${displayOrderId}`,
+        html: (() => {
+          const { getOwnerOrderTemplate } = require('../utils/emailTemplates');
+          return getOwnerOrderTemplate(order, { email: userEmail, name: userName });
+        })(),
+        text: `
+NEW ORDER ALERT: #${displayOrderId}
+
+Customer Name: ${userName || 'Customer'}
+Customer Email: ${userEmail}
+Customer Phone: ${order.phone}
+Shipping Address: ${order.address}
+Payment Method: ${order.paymentMethod}
+
+Order Items:
+${order.items.map(item => `- ${item.name} x ${item.quantity}: ₹${parseFloat(item.price).toFixed(2)} each`).join('\n')}
+
+Total Amount: ₹${parseFloat(order.totalAmount).toFixed(2)}
+        `
+      };
+      const ownerInfo = await dynamicTransporter.sendMail(ownerMailOptions);
+      console.log(`✅ Order notification email sent to owner: ${ownerInfo.messageId}`);
+    } catch (ownerError) {
+      console.error('❌ Error sending order notification to owner:', ownerError);
+    }
+    
+    return {
+      success: true,
+      messageId: info.messageId,
+      email: userEmail
+    };
+  } catch (error) {
+    console.error('❌ Error sending order confirmation email:', error);
+    return {
+      success: false,
+      error: error.message
+    };
+  }
+};
+// Function to send order status update email dynamically
+const sendStatusUpdateEmail = async (order, userEmail, userName) => {
+  try {
+    const { transporter: dynamicTransporter, settings } = await getDynamicTransporter();
+    const displayOrderId = order.orderId || `BSK-O-${String(order._id).slice(-8).toUpperCase()}`;
+    const senderEmail = settings.senderEmail || 'drbskhealthcare@gmail.com';
+
+    let statusText = '';
+    let statusDescription = '';
+    let statusColor = '#3b82f6'; // blue
+
+    switch (order.status) {
+      case 'Confirmed':
+        statusText = 'Confirmed';
+        statusDescription = 'Your order has been confirmed by our team and is ready for packaging.';
+        statusColor = '#10b981'; // green
+        break;
+      case 'Processing':
+        statusText = 'Processing';
+        statusDescription = 'Our pharmacists are processing your healthcare products and packaging them securely.';
+        statusColor = '#f59e0b'; // orange
+        break;
+      case 'Shipped':
+        statusText = 'Shipped';
+        statusDescription = 'Your package is on its way! We have dispatched it with our shipping partner.';
+        statusColor = '#8b5cf6'; // purple
+        break;
+      case 'Delivered':
+        statusText = 'Delivered';
+        statusDescription = 'Hooray! Your order has been delivered. Thank you for choosing Dr BSK Healthcare!';
+        statusColor = '#10b981'; // green
+        break;
+      case 'Cancelled':
+        statusText = 'Cancelled';
+        statusDescription = `Your order has been cancelled. Reason: ${order.cancelReason || 'Cancelled by admin'}.`;
+        statusColor = '#ef4444'; // red
+        break;
+      default:
+        statusText = order.status;
+        statusDescription = `Your order status is updated to ${order.status}.`;
+        statusColor = '#3b82f6';
+    }
+
+    const mailOptions = {
+      from: {
+        name: process.env.STORE_NAME || 'Dr BSK Healthcare',
+        address: senderEmail
+      },
+      to: userEmail,
+      subject: `Order Status Update #${displayOrderId}: ${statusText} - Dr BSK Healthcare`,
+      html: (() => {
+        const { getStatusUpdateTemplate } = require('../utils/emailTemplates');
+        return getStatusUpdateTemplate(order, { email: userEmail, name: userName }, statusText, statusDescription, statusColor);
+      })(),
+      text: `
+Order Status Update: ${statusText}
+
+Dear ${userName || 'Customer'},
+
+The status of your order #${displayOrderId} has been updated to: ${statusText}.
+
+${statusDescription}
+
+ORDER DETAILS:
+Order ID: ${displayOrderId}
+Payment Method: ${order.paymentMethod || 'Online'}
+Total Amount: ₹${parseFloat(order.totalAmount).toFixed(2)}
+
+Thank you for choosing Dr BSK Healthcare!
+      `
+    };
+
+    console.log(`Sending order status update email to: ${userEmail}`);
+    const info = await dynamicTransporter.sendMail(mailOptions);
+    console.log(`%. Order status update email sent to customer: ${info.messageId}`);
+    return { success: true };
+  } catch (error) {
+    console.error('❌ Error sending order status update email:', error);
+    return { success: false, error: error.message };
+  }
+};
+
+
+
 const createDelhiveryShipmentForOrder = async (order) => {
   try {
     const delivery = await createShipmentAndPickup(order);
@@ -61,29 +355,25 @@ router.use((req, res, next) => {
   next();
 });
 
-// Validate environment variables
+// Validate environment variables (warn only since settings can be in database)
 if (!process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) {
-  console.error("❌ Razorpay credentials not found in environment variables!");
-  console.error("Please set RAZORPAY_KEY_ID and RAZORPAY_KEY_SECRET in your .env file");
-  throw new Error("Payment gateway configuration error");
+  console.warn("⚠️ Razorpay credentials not found in environment variables. Ensure they are configured in the Admin settings dashboard.");
+} else {
+  console.log("✅ Fallback Razorpay credentials loaded from env:", {
+    keyId: `${process.env.RAZORPAY_KEY_ID.substring(0, 10)}...`
+  });
 }
 
-console.log("✅ Razorpay credentials loaded:", {
-  keyId: process.env.RAZORPAY_KEY_ID ? `${process.env.RAZORPAY_KEY_ID.substring(0, 10)}...` : "missing",
-  keySecret: process.env.RAZORPAY_KEY_SECRET ? "***SECRET***" : "missing"
-});
-
-// Initialize Razorpay instance with proper error handling
+// Initialize fallback Razorpay instance
 let razorpayInstance;
 try {
   razorpayInstance = new Razorpay({
-    key_id: process.env.RAZORPAY_KEY_ID,
-    key_secret: process.env.RAZORPAY_KEY_SECRET,
+    key_id: process.env.RAZORPAY_KEY_ID || 'placeholder_id',
+    key_secret: process.env.RAZORPAY_KEY_SECRET || 'placeholder_secret',
   });
-  console.log("✅ Razorpay instance created successfully");
+  console.log("✅ Fallback Razorpay instance created successfully");
 } catch (initError) {
-  console.error("❌ Failed to initialize Razorpay:", initError.message);
-  throw initError;
+  console.error("❌ Failed to initialize fallback Razorpay:", initError.message);
 }
 
 const parseProductVariants = (raw) => {
@@ -295,163 +585,9 @@ const enrichOrderCustomerNames = async (orders) => {
 };
 
 // Email template function
-const generateOrderEmailTemplate = (order, user) => {
-  const displayOrderId = order.orderId || `BSK-O-${String(order._id).slice(-8).toUpperCase()}`;
-  const itemsHtml = order.items.map(item => `
-    <tr>
-      <td style="padding: 10px; border: 1px solid #ddd;">
-        <div style="display: flex; align-items: center;">
-          <div>
-            <strong>${item.name}</strong>
-            ${item.category ? `<br><small>Category: ${item.category}</small>` : ''}
-          </div>
-        </div>
-      </td>
-      <td style="padding: 10px; border: 1px solid #ddd; text-align: center;">${item.quantity}</td>
-      <td style="padding: 10px; border: 1px solid #ddd; text-align: right;">₹${item.price.toFixed(2)}</td>
-      <td style="padding: 10px; border: 1px solid #ddd; text-align: right;">₹${(item.price * item.quantity).toFixed(2)}</td>
-    </tr>
-  `).join('');
-
-  return `
-    <!DOCTYPE html>
-    <html>
-    <head>
-      <meta charset="UTF-8">
-      <meta name="viewport" content="width=device-width, initial-scale=1.0">
-      <title>Order Confirmation - ${displayOrderId}</title>
-      <style>
-        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; margin: 0; padding: 20px; background-color: #f7f9fc; }
-        .container { max-width: 600px; margin: 0 auto; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
-        .header { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; padding: 30px 20px; text-align: center; }
-        .header h1 { margin: 0; font-size: 28px; }
-        .header p { margin: 10px 0 0; opacity: 0.9; }
-        .content { padding: 30px; }
-        .section { margin-bottom: 25px; }
-        .section-title { color: #667eea; border-bottom: 2px solid #667eea; padding-bottom: 8px; margin-bottom: 15px; font-size: 18px; font-weight: 600; }
-        .info-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 15px; }
-        .info-item { background: #f8f9fa; padding: 12px 15px; border-radius: 6px; border-left: 4px solid #667eea; }
-        .info-label { font-weight: 600; color: #555; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; }
-        .info-value { color: #222; font-size: 15px; margin-top: 5px; }
-        .order-table { width: 100%; border-collapse: collapse; margin: 20px 0; }
-        .order-table th { background: #667eea; color: white; padding: 12px; text-align: left; }
-        .order-table td { padding: 12px; border-bottom: 1px solid #eee; }
-        .order-table tr:hover { background: #f9f9f9; }
-        .total-row { background: #f0f7ff; font-weight: bold; }
-        .status-badge { display: inline-block; padding: 6px 12px; border-radius: 20px; font-size: 12px; font-weight: 600; }
-        .status-pending { background: #fff3cd; color: #856404; }
-        .footer { background: #f8f9fa; padding: 20px; text-align: center; color: #666; font-size: 14px; border-top: 1px solid #eee; }
-        .footer a { color: #667eea; text-decoration: none; }
-        .footer a:hover { text-decoration: underline; }
-        .order-id { font-family: monospace; background: #f1f3f4; padding: 4px 8px; border-radius: 4px; font-size: 14px; }
-        .highlight { background: linear-gradient(120deg, #a1c4fd 0%, #c2e9fb 100%); padding: 10px 15px; border-radius: 6px; margin: 15px 0; border-left: 4px solid #4dabf7; }
-        @media (max-width: 600px) {
-          .content { padding: 20px; }
-          .info-grid { grid-template-columns: 1fr; }
-        }
-      </style>
-    </head>
-    <body>
-      <div class="container">
-        <div class="header">
-          <h1>🎉 Order Confirmed!</h1>
-          <p>Thank you for your purchase. Your order has been received and is being processed.</p>
-        </div>
-        
-        <div class="content">
-          <div class="section">
-            <div class="section-title">Order Summary</div>
-            <div class="info-grid">
-              <div class="info-item">
-                <div class="info-label">Order ID</div>
-                <div class="info-value order-id">${displayOrderId}</div>
-              </div>
-              <div class="info-item">
-                <div class="info-label">Order Date</div>
-                <div class="info-value">${new Date(order.createdAt).toLocaleDateString('en-IN', { 
-                  weekday: 'long', 
-                  year: 'numeric', 
-                  month: 'long', 
-                  day: 'numeric',
-                  hour: '2-digit',
-                  minute: '2-digit'
-                })}</div>
-              </div>
-              <div class="info-item">
-                <div class="info-label">Status</div>
-                <div class="info-value">
-                  <span class="status-badge status-pending">${order.status}</span>
-                </div>
-              </div>
-              <div class="info-item">
-                <div class="info-label">Payment</div>
-                <div class="info-value">Paid via Razorpay (${order.paymentInfo?.method || 'Online'})</div>
-              </div>
-            </div>
-          </div>
-
-          <div class="highlight">
-            <strong>📦 Delivery Address:</strong><br>
-            ${order.userName || 'Customer'}<br>
-            ${order.address}<br>
-            📞 ${order.phone}<br>
-            📧 ${order.email}
-          </div>
-
-          <div class="section">
-            <div class="section-title">Order Details</div>
-            <table class="order-table">
-              <thead>
-                <tr>
-                  <th>Product</th>
-                  <th style="text-align: center;">Qty</th>
-                  <th style="text-align: right;">Price</th>
-                  <th style="text-align: right;">Total</th>
-                </tr>
-              </thead>
-              <tbody>
-                ${itemsHtml}
-                <tr class="total-row">
-                  <td colspan="3" style="text-align: right; padding-right: 15px;"><strong>Total Amount:</strong></td>
-                  <td style="text-align: right; font-size: 18px; color: #667eea;">
-                    <strong>₹${order.totalAmount.toFixed(2)}</strong>
-                  </td>
-                </tr>
-              </tbody>
-            </table>
-          </div>
-
-          <div class="section">
-            <div class="section-title">Next Steps</div>
-            <ul style="margin: 0; padding-left: 20px;">
-              <li>Your order is being processed and will be shipped soon.</li>
-              <li>You will receive shipping confirmation once your order is dispatched.</li>
-              <li>For any queries, reply to this email or contact our support team.</li>
-              <li>You can track your order status from your account dashboard.</li>
-            </ul>
-          </div>
-
-          <div style="text-align: center; margin-top: 30px; padding: 15px; background: #f0f7ff; border-radius: 8px;">
-            <strong>Need Help?</strong><br>
-            Contact our customer support at 
-            <a href="mailto:ukgermanpharmaceutical@gmail.com">support@Drbsk.com</a> 
-            or call us at <strong>+91-9115513759</strong>
-          </div>
-        </div>
-
-        <div class="footer">
-          <p>Thank you for shopping with us! 🛍️</p>
-          <p>
-            <a href="${process.env.STORE_URL || 'https://yourstore.com'}">Visit Our Store</a>
-          </p>
-          <p style="margin-top: 15px; font-size: 12px; color: #888;">
-            This is an automated email. Please do not reply directly to this message.
-          </p>
-        </div>
-      </div>
-    </body>
-    </html>
-  `;
+const generateOrderEmailTemplate = (order, user, newUserDetails = null) => {
+  const { getCustomerOrderTemplate } = require('../utils/emailTemplates');
+  return getCustomerOrderTemplate(order, user, newUserDetails);
 };
 
 // Function to send order confirmation email
@@ -769,7 +905,8 @@ router.post('/capturePayment/:orderId', async (req, res) => {
 
     console.log("Capturing payment:", paymentId);
     
-    const capturedPayment = await razorpayInstance.payments.capture(
+    const { instance: rzp } = await getRazorpay();
+    const capturedPayment = await rzp.payments.capture(
       paymentId,
       Math.round(order.totalAmount * 100),
       { currency: "INR" }
@@ -1352,10 +1489,11 @@ router.post('/createPaymentOrder', async (req, res) => {
 
     console.log("Creating Razorpay order with data:", JSON.stringify(razorpayOrderData, null, 2));
 
+    const { instance: rzp, keyId } = await getRazorpay();
     let razorpayOrder;
     try {
       // Use async/await properly
-      razorpayOrder = await razorpayInstance.orders.create(razorpayOrderData);
+      razorpayOrder = await rzp.orders.create(razorpayOrderData);
       console.log("✅ Razorpay order created successfully:", {
         id: razorpayOrder.id,
         amount: razorpayOrder.amount,
@@ -1410,7 +1548,7 @@ router.post('/createPaymentOrder', async (req, res) => {
         receipt: razorpayOrder.receipt,
         line_items_total: razorpayOrder.line_items_total
       },
-      key_id: process.env.RAZORPAY_KEY_ID,
+      key_id: keyId,
       ...(checkoutToken ? { checkoutToken } : {})
     });
 
@@ -1474,8 +1612,9 @@ router.post('/verifyPayment', async (req, res) => {
     }
 
     // Verify payment signature
+    const { instance: rzp, keySecret } = await getRazorpay();
     const generatedSignature = crypto
-      .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+      .createHmac('sha256', keySecret)
       .update(`${razorpay_order_id}|${razorpay_payment_id}`)
       .digest('hex');
 
@@ -1506,8 +1645,8 @@ router.post('/verifyPayment', async (req, res) => {
     let razorpayOrderDetails;
     try {
       [paymentDetails, razorpayOrderDetails] = await Promise.all([
-        razorpayInstance.payments.fetch(razorpay_payment_id),
-        razorpayInstance.orders.fetch(razorpay_order_id)
+        rzp.payments.fetch(razorpay_payment_id),
+        rzp.orders.fetch(razorpay_order_id)
       ]);
       console.log("Payment details from Razorpay:", {
         id: paymentDetails.id,
@@ -1634,35 +1773,6 @@ router.post('/verifyPayment', async (req, res) => {
       });
     }
 
-    // Prepare user details
-    let userEmail = resolvedEmail;
-    let userName = pickCustomerName({ name: resolvedName, email: resolvedEmail });
-    let isGuest = false;
-
-    if (String(verifiedUserId).startsWith('guest_')) {
-      console.log("Processing guest order");
-      isGuest = true;
-      userName = pickCustomerName({ name: resolvedName, email: resolvedEmail }, userName) || getEmailLocalPart(resolvedEmail) || 'Customer';
-    } else {
-      try {
-        const user = await Admin.findById(verifiedUserId);
-        if (user) {
-          userEmail = user.email || resolvedEmail;
-          userName = pickCustomerName(
-            { name: resolvedName, email: userEmail },
-            { name: user.name, email: userEmail }
-          ) || getEmailLocalPart(userEmail) || 'Customer';
-        } else {
-          isGuest = true;
-          userName = pickCustomerName({ name: resolvedName, email: resolvedEmail }) || getEmailLocalPart(resolvedEmail) || 'Customer';
-        }
-      } catch (error) {
-        console.error("Error fetching user:", error.message);
-        isGuest = true;
-        userName = userName || getEmailLocalPart(resolvedEmail) || 'Customer';
-      }
-    }
-
     // Prepare phone number
     let formattedPhone = resolvedPhone.toString().trim();
     formattedPhone = formattedPhone.replace(/^\+91/, '').replace(/^91/, '');
@@ -1673,6 +1783,86 @@ router.post('/verifyPayment', async (req, res) => {
       });
     }
     formattedPhone = `+91${formattedPhone}`;
+
+    // Prepare user details
+    let userEmail = resolvedEmail;
+    let userName = resolvedName || 'Customer';
+    let isGuest = false;
+    let newUserDetails = null;
+
+    let user = null;
+    const mongoose = require('mongoose');
+    const bcrypt = require('bcryptjs');
+    if (verifiedUserId && !String(verifiedUserId).startsWith('guest_') && mongoose.Types.ObjectId.isValid(verifiedUserId)) {
+      try {
+        user = await Admin.findById(verifiedUserId);
+      } catch (err) {
+        console.error("Error finding user by ID:", err.message);
+      }
+    }
+    
+    if (!user && resolvedEmail) {
+      try {
+        user = await Admin.findOne({ email: resolvedEmail.toLowerCase().trim() });
+      } catch (err) {
+        console.error("Error finding user by email:", err.message);
+      }
+    }
+
+    if (!user) {
+      // Auto-create user account!
+      const generatedPassword = Math.random().toString(36).slice(-8);
+      const hashedPassword = await bcrypt.hash(generatedPassword, 10);
+      
+      try {
+        user = await Admin.create({
+          name: resolvedName || resolvedEmail.split('@')[0] || 'Customer',
+          email: resolvedEmail.toLowerCase().trim(),
+          phone: formattedPhone,
+          password: hashedPassword,
+          address: resolvedAddress ? [resolvedAddress] : [],
+          role: 'User',
+          timeStamp: new Date().toISOString()
+        });
+        
+        newUserDetails = {
+          isNew: true,
+          password: generatedPassword
+        };
+        console.log(`Auto-created user for email ${resolvedEmail} with password ${generatedPassword}`);
+      } catch (createErr) {
+        console.error("Error auto-creating user:", createErr.message);
+      }
+    } else {
+      // User exists, update address/phone if missing
+      let updated = false;
+      if (!user.phone && formattedPhone) {
+        user.phone = formattedPhone;
+        updated = true;
+      }
+      if (resolvedAddress && !user.address.includes(resolvedAddress)) {
+        user.address.push(resolvedAddress);
+        updated = true;
+      }
+      if (updated) {
+        try {
+          await user.save();
+        } catch (saveErr) {
+          console.error("Error updating existing user info:", saveErr.message);
+        }
+      }
+    }
+
+    if (user) {
+      verifiedUserId = user._id;
+      userEmail = user.email;
+      userName = user.name || resolvedName || 'Customer';
+      isGuest = false;
+    } else {
+      isGuest = true;
+      userEmail = resolvedEmail;
+      userName = resolvedName || getEmailLocalPart(resolvedEmail) || 'Customer';
+    }
 
     // Prepare items with media
     console.log("Preparing order items...");
@@ -1757,10 +1947,11 @@ router.post('/verifyPayment', async (req, res) => {
       // ✅ SEND EMAIL HERE - After order is successfully saved
       try {
         console.log("Sending order confirmation email...");
-        const emailResult = await sendOrderConfirmationEmail(
+        const emailResult = await sendOrderConfirmationEmailDynamic(
           savedOrder.toObject(), 
           userEmail, 
-          userName
+          userName,
+          newUserDetails
         );
         
         if (emailResult.success) {
@@ -1884,7 +2075,8 @@ router.put('/orders/:orderId/status', async (req, res) => {
         try {
           // Call Razorpay refund API
           console.log("Calling Razorpay refund API...");
-          const refund = await razorpayInstance.payments.refund(
+          const { instance: rzp } = await getRazorpay();
+          const refund = await rzp.payments.refund(
             order.paymentInfo.paymentId,
             {
               amount: Math.round(order.totalAmount * 100),
@@ -1979,6 +2171,19 @@ router.put('/orders/:orderId/status', async (req, res) => {
     // Save the order
     await order.save();
     console.log("Order saved successfully");
+
+    // Send status update email to customer
+    try {
+      const emailToUse = order.userEmail || order.email;
+      const nameToUse = order.userName || 'Customer';
+      if (emailToUse) {
+        sendStatusUpdateEmail(order.toObject ? order.toObject() : order, emailToUse, nameToUse)
+          .then(res => console.log("Status update email result:", res))
+          .catch(err => console.error("Status update email error:", err));
+      }
+    } catch (emailErr) {
+      console.error("Error initiating status update email:", emailErr);
+    }
 
     const responseMessage = status === 'Cancelled'
       ? `Order cancelled successfully! ${refundProcessed
@@ -2244,7 +2449,7 @@ router.post('/orders/:orderId/resend-email', async (req, res) => {
       });
     }
 
-    const emailResult = await sendOrderConfirmationEmail(
+    const emailResult = await sendOrderConfirmationEmailDynamic(
       order.toObject(),
       order.userEmail || order.email,
       order.userName || 'Customer'
@@ -2296,8 +2501,9 @@ router.get('/paymentStatus/:razorpayOrderId', async (req, res) => {
       });
     }
 
-    const razorpayOrder = await razorpayInstance.orders.fetch(razorpayOrderId);
-    const payments = await razorpayInstance.orders.fetchPayments(razorpayOrderId);
+    const { instance: rzp } = await getRazorpay();
+    const razorpayOrder = await rzp.orders.fetch(razorpayOrderId);
+    const payments = await rzp.orders.fetchPayments(razorpayOrderId);
 
     res.status(200).json({
       success: true,
@@ -2526,7 +2732,8 @@ router.get('/orders/:orderId/refund-status', async (req, res) => {
 
     if (order.refundInfo?.refundId && order.paymentInfo?.paymentId) {
       try {
-        const refunds = await razorpayInstance.payments.fetchMultipleRefund(order.paymentInfo.paymentId);
+        const { instance: rzp } = await getRazorpay();
+        const refunds = await rzp.payments.fetchMultipleRefund(order.paymentInfo.paymentId);
         const latestRefund = refunds.items.find(r => r.id === order.refundInfo.refundId);
 
         if (latestRefund) {
@@ -2800,19 +3007,86 @@ router.post('/createCOD', async (req, res) => {
     // Generate order ID
     const orderId = `COD${Date.now()}${Math.random().toString(36).substr(2, 5).toUpperCase()}`;
 
-    // Prepare user name
-    let profileUser = null;
-    if (userId && !String(userId).startsWith('guest_') && /^[a-f\d]{24}$/i.test(String(userId))) {
-      profileUser = await Admin.findById(userId).select('name email').lean().catch(() => null);
+    // Prepare user details
+    let resolvedUserId = userId;
+    let resolvedEmail = email;
+    let resolvedName = requestedUserName || fullName || customerName || name || 'Customer';
+    let newUserDetails = null;
+
+    let user = null;
+    const mongoose = require('mongoose');
+    const bcrypt = require('bcryptjs');
+    if (userId && !String(userId).startsWith('guest_') && mongoose.Types.ObjectId.isValid(userId)) {
+      try {
+        user = await Admin.findById(userId);
+      } catch (err) {
+        console.error("Error finding user by ID:", err.message);
+      }
     }
-    if (!profileUser) {
-      profileUser = await Admin.findOne({ email: String(email).toLowerCase() }).select('name email').lean().catch(() => null);
+    
+    if (!user && email) {
+      try {
+        user = await Admin.findOne({ email: email.toLowerCase().trim() });
+      } catch (err) {
+        console.error("Error finding user by email:", err.message);
+      }
     }
 
-    const userName = pickCustomerName(
-      { name: requestedUserName || fullName || customerName || name, email },
-      { name: profileUser?.name, email: profileUser?.email || email }
-    ) || getEmailLocalPart(email) || 'Customer';
+    if (!user) {
+      // Auto-create user account!
+      const generatedPassword = Math.random().toString(36).slice(-8);
+      const hashedPassword = await bcrypt.hash(generatedPassword, 10);
+      
+      try {
+        user = await Admin.create({
+          name: resolvedName || email.split('@')[0] || 'Customer',
+          email: email.toLowerCase().trim(),
+          phone: formattedPhone,
+          password: hashedPassword,
+          address: address ? [address] : [],
+          role: 'User',
+          timeStamp: new Date().toISOString()
+        });
+        
+        newUserDetails = {
+          isNew: true,
+          password: generatedPassword
+        };
+        console.log(`Auto-created user for email ${email} with password ${generatedPassword}`);
+      } catch (createErr) {
+        console.error("Error auto-creating user:", createErr.message);
+      }
+    } else {
+      // User exists, update address/phone if missing
+      let updated = false;
+      if (!user.phone && formattedPhone) {
+        user.phone = formattedPhone;
+        updated = true;
+      }
+      if (address && !user.address.includes(address)) {
+        user.address.push(address);
+        updated = true;
+      }
+      if (updated) {
+        try {
+          await user.save();
+        } catch (saveErr) {
+          console.error("Error updating existing user info:", saveErr.message);
+        }
+      }
+    }
+
+    let finalUserId = userId;
+    let finalUserName = resolvedName;
+    let finalUserEmail = email;
+    if (user) {
+      finalUserId = user._id;
+      finalUserEmail = user.email;
+      finalUserName = user.name || resolvedName || 'Customer';
+    } else {
+      finalUserEmail = email;
+      finalUserName = resolvedName || getEmailLocalPart(email) || 'Customer';
+    }
 
     // Calculate base amount and cod charge
     let calculatedBaseAmount = 0;
@@ -2888,9 +3162,9 @@ router.post('/createCOD', async (req, res) => {
     
     const orderData = {
       orderId: orderId,
-      userId: userId,
-      userEmail: email,
-      userName: userName,
+      userId: finalUserId,
+      userEmail: finalUserEmail,
+      userName: finalUserName,
       email: email,
       items: itemsWithMedia,
       address: address.toString().trim(),
@@ -2947,10 +3221,11 @@ router.post('/createCOD', async (req, res) => {
     // Send confirmation email for COD order
     try {
       console.log("Sending COD order confirmation email...");
-      const emailResult = await sendOrderConfirmationEmail(
+      const emailResult = await sendOrderConfirmationEmailDynamic(
         savedOrder.toObject(), 
-        email, 
-        userName
+        finalUserEmail, 
+        finalUserName,
+        newUserDetails
       );
       
       if (emailResult.success) {

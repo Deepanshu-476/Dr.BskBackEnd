@@ -8,6 +8,7 @@ const productController = require("./controllers/productControllers");
 const orderRoutes = require("./routes/order");
 const nodemailer = require('nodemailer');
 const razorpayWebhookRouter = require('./routes/razorpayWebhook');
+const EmailSettings = require('./models/EmailSettings');
 const facebookRateLimiter = require('./middlewares/facebookRateLimiter');
 const fs = require("fs");
 const path = require('path');
@@ -148,9 +149,23 @@ const clientIp = (
       serverEvent.setEventSourceUrl('https://drbskhealthcare.com');
     }
 
+    // Fetch active Facebook settings from DB, fallback to env
+    let activeToken = FACEBOOK_ACCESS_TOKEN;
+    let activePixel = FACEBOOK_PIXEL_ID;
+    try {
+      const FacebookSettings = require('./models/FacebookSettings');
+      const activeSetting = await FacebookSettings.findOne({ isActive: true });
+      if (activeSetting) {
+        activeToken = activeSetting.accessToken;
+        activePixel = activeSetting.pixelId;
+      }
+    } catch (dbErr) {
+      console.error("Error reading active Facebook settings:", dbErr);
+    }
+
     // Create EventRequest
     const eventsData = [serverEvent];
-    const eventRequest = new bizSdk.EventRequest(FACEBOOK_ACCESS_TOKEN, FACEBOOK_PIXEL_ID)
+    const eventRequest = new bizSdk.EventRequest(activeToken, activePixel)
       .setEvents(eventsData);
 
     // Execute the request
@@ -195,6 +210,7 @@ const couponRoutes = require('./routes/couponRoutes');
 
 
 app.use('/api', require('./routes/paymentSettings'));
+app.use('/api/facebook-settings', require('./routes/facebookSettings'));
 
 // Use routes - यहाँ सभी routes को mount करें
 app.use('/admin', adminRoutes);
@@ -321,17 +337,8 @@ app.post('/api/test-facebook-event', async (req, res) => {
 
 // ==================== OTP Email Verification Routes ====================
 
-// Setup Nodemailer transporter
-const transporter = nodemailer.createTransport({
-  service: 'gmail',
-  auth: {
-    user: process.env.EMAIL_USERNAME,
-    pass: process.env.EMAIL_PASSWORD,
-  }
-});
-
 // Endpoint to send OTP to email
-app.post('/api/send-otp', (req, res) => {
+app.post('/api/send-otp', async (req, res) => {
   const { email } = req.body;
   if (!email) {
     return res.status(400).json({ message: 'Email is required' });
@@ -343,21 +350,46 @@ app.post('/api/send-otp', (req, res) => {
   // Store OTP with 5-minute expiry
   otpStore[email] = { otp, expires: Date.now() + 5 * 60 * 1000 };
 
-  const mailOptions = {
-    from: process.env.EMAIL_USERNAME,
-    to: email,
-    subject: 'Your OTP Code',
-    text: `Your OTP code is ${otp}. It will expire in 5 minutes.`,
-  };
-
-  transporter.sendMail(mailOptions, (error, info) => {
-    if (error) {
-      logger.error('Failed to send OTP email', { error: error.message, stack: error.stack });
-      return res.status(500).json({ message: error.message });
+  try {
+    let settings = await EmailSettings.findOne();
+    if (!settings) {
+      settings = await EmailSettings.create({});
     }
-    logger.info('OTP email sent', { to: email });
+
+    const smtpUser = settings.senderEmail || process.env.SMTP_USER || 'drbskhealthcare@gmail.com';
+    const smtpPass = settings.senderPassword || process.env.SMTP_PASS || 'yxnykcgxwtslcdtl';
+
+    const dynamicTransporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
+      auth: {
+        user: smtpUser,
+        pass: smtpPass
+      },
+      tls: {
+        rejectUnauthorized: false
+      }
+    });
+
+    const mailOptions = {
+      from: {
+        name: process.env.STORE_NAME || 'Dr BSK Healthcare',
+        address: smtpUser
+      },
+      to: email,
+      subject: 'Your OTP Code',
+      text: `Your OTP code is ${otp}. It will expire in 5 minutes.`,
+    };
+
+    console.log(`Sending dynamic OTP email from ${smtpUser} to ${email}...`);
+    const info = await dynamicTransporter.sendMail(mailOptions);
+    logger.info('OTP email sent', { to: email, messageId: info.messageId });
     res.json({ message: 'OTP sent successfully' });
-  });
+  } catch (error) {
+    logger.error('Failed to send OTP email', { error: error.message, stack: error.stack });
+    res.status(500).json({ message: error.message });
+  }
 });
 
 // Endpoint to verify OTP with phone and save user
