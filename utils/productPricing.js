@@ -17,6 +17,82 @@ const resolvePricingTier = async (user) => {
   return partner ? "wholesale" : "consumer";
 };
 
+const reconstructStringFromObject = (obj) => {
+  if (typeof obj === 'object' && obj !== null && !Array.isArray(obj) && obj["0"] !== undefined) {
+    let s = "";
+    for (let i = 0; obj[String(i)] !== undefined; i++) {
+      s += obj[String(i)];
+    }
+    return s;
+  }
+  return null;
+};
+
+const normalizeQuantity = (raw) => {
+  try {
+    if (!raw) return [];
+    
+    const reconstructedRaw = reconstructStringFromObject(raw);
+    if (reconstructedRaw !== null) {
+      raw = reconstructedRaw;
+    }
+    
+    let arr = [];
+    if (Array.isArray(raw)) {
+      if (raw.length > 0) {
+        if (Array.isArray(raw[0])) {
+          arr = raw.flat();
+        } else {
+          arr = raw;
+        }
+      }
+      
+      if (arr.length > 0 && typeof arr[0] === 'object' && arr[0] !== null && arr[0]["0"] !== undefined) {
+        arr = arr.flatMap((item) => {
+          const s = reconstructStringFromObject(item);
+          if (s !== null) {
+            try {
+              const parsed = JSON.parse(s);
+              return Array.isArray(parsed) ? parsed : [parsed];
+            } catch {
+              return [];
+            }
+          }
+          return [item];
+        });
+      }
+      
+      if (arr.length > 0 && typeof arr[0] === "string") {
+        arr = arr.flatMap((item) => {
+          try {
+            const parsed = JSON.parse(item);
+            return Array.isArray(parsed) ? parsed : [parsed];
+          } catch (err) {
+            return [];
+          }
+        });
+      }
+    } else if (typeof raw === "string") {
+      try {
+        arr = JSON.parse(raw);
+        if (Array.isArray(arr) && arr.length > 0 && Array.isArray(arr[0])) {
+          arr = arr.flat();
+        }
+      } catch {
+        arr = [];
+      }
+    } else {
+      arr = [];
+    }
+    
+    if (!Array.isArray(arr)) return [];
+    return arr;
+  } catch (err) {
+    console.error("Error normalizing quantity:", err);
+    return [];
+  }
+};
+
 const applyVariantPricing = (variant, product, pricingTier) => {
   if (pricingTier === "admin") return { ...variant };
 
@@ -47,6 +123,9 @@ const applyVariantPricing = (variant, product, pricingTier) => {
 const applyProductPricing = (product, pricingTier) => {
   const value =
     typeof product?.toObject === "function" ? product.toObject() : { ...product };
+
+  value.quantity = normalizeQuantity(value.quantity);
+
   if (pricingTier === "admin") {
     return { ...value, pricing_tier: pricingTier };
   }

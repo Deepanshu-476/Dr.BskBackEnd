@@ -10,6 +10,7 @@ const WholesalePartner = require("../models/wholeSale");
 const crypto = require('crypto');
 const Order = require("../models/order");
 const mongoose = require('mongoose');
+const EmailSettings = require("../models/EmailSettings");
 require("dotenv").config();
 
 // OTP Model
@@ -104,33 +105,36 @@ const sendOtp = async (req, res) => {
 // Email sending function
 const sendEmailOtp = async (email, otp) => {
   try {
+    let settings = await EmailSettings.findOne();
+    if (!settings) {
+      settings = await EmailSettings.create({});
+    }
+
+    const smtpUser = settings.senderEmail || process.env.SMTP_USER || 'drbskhealthcare@gmail.com';
+    const smtpPass = settings.senderPassword || process.env.SMTP_PASS || 'yxnykcgxwtslcdtl';
+
     const transporter = nodemailer.createTransport({
-      host: process.env.SMTP_HOST || 'smtp.gmail.com',
-      port: process.env.SMTP_PORT || 587,
-      secure: process.env.SMTP_SECURE === 'true',
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
       auth: {
-        user: process.env.SMTP_USER,
-        pass: process.env.SMTP_PASS
+        user: smtpUser,
+        pass: smtpPass
+      },
+      tls: {
+        rejectUnauthorized: false
       }
     });
     
+    const { getOtpTemplate } = require('../utils/emailTemplates');
     const mailOptions = {
-      from: process.env.SMTP_FROM || process.env.SMTP_USER,
+      from: {
+        name: process.env.STORE_NAME || 'Dr BSK Healthcare',
+        address: smtpUser
+      },
       to: email,
       subject: 'Your OTP for Login',
-      html: `
-        <div style="font-family: Arial, sans-serif; max-width: 600px; margin: 0 auto;">
-          <h2 style="color: #333;">Login OTP</h2>
-          <p>Your OTP for login is:</p>
-          <div style="background-color: #f4f4f4; padding: 10px; border-radius: 5px; font-size: 24px; font-weight: bold; letter-spacing: 5px; text-align: center;">
-            ${otp}
-          </div>
-          <p>This OTP is valid for 10 minutes.</p>
-          <p>If you didn't request this OTP, please ignore this email.</p>
-          <hr>
-          <p style="color: #666; font-size: 12px;">This is an automated message, please do not reply.</p>
-        </div>
-      `
+      html: getOtpTemplate(otp)
     };
     
     await transporter.sendMail(mailOptions);
@@ -676,6 +680,117 @@ const getAdminCount = async (req, res) => {
   }
 };
 
+
+// Middleware to upload multiple attachments
+const attachmentsUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const uploadDir = path.join(__dirname, "../uploads/attachments");
+      if (!fs.existsSync(uploadDir)) {
+        fs.mkdirSync(uploadDir, { recursive: true });
+      }
+      cb(null, uploadDir);
+    },
+    filename: (req, file, cb) => {
+      cb(null, `${Date.now()}-${file.originalname}`);
+    }
+  }),
+  limits: { fileSize: 10 * 1024 * 1024 } // 10MB limit
+}).array('attachments', 5);
+
+// Send custom email controller
+const sendCustomEmail = async (req, res) => {
+  try {
+    const { to, subject, body } = req.body;
+    
+    if (!to || !subject || !body) {
+      return res.status(400).json({ success: false, message: "Recipient email, subject and body are required" });
+    }
+
+    let settings = await EmailSettings.findOne();
+    if (!settings) {
+      settings = await EmailSettings.create({});
+    }
+
+    const smtpUser = settings.senderEmail || process.env.SMTP_USER || 'drbskhealthcare@gmail.com';
+    const smtpPass = settings.senderPassword || process.env.SMTP_PASS || 'yxnykcgxwtslcdtl';
+
+    const transporter = nodemailer.createTransport({
+      host: 'smtp.gmail.com',
+      port: 587,
+      secure: false,
+      auth: {
+        user: smtpUser,
+        pass: smtpPass
+      },
+      tls: {
+        rejectUnauthorized: false
+      }
+    });
+
+    const attachments = [];
+    if (req.files && req.files.length > 0) {
+      req.files.forEach(file => {
+        attachments.push({
+          filename: file.originalname,
+          path: file.path
+        });
+      });
+    }
+
+    const mailOptions = {
+      from: {
+        name: process.env.STORE_NAME || 'Dr BSK Healthcare',
+        address: smtpUser
+      },
+      to: to,
+      subject: subject,
+      html: `
+        <div style="font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; line-height: 1.6; color: #333; padding: 20px; background-color: #f7f9fc;">
+          <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 10px; overflow: hidden; box-shadow: 0 4px 15px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; padding: 30px;">
+            <div style="margin-bottom: 25px; border-bottom: 2px solid #2563eb; padding-bottom: 10px;">
+              <h2 style="color: #2563eb; margin: 0; font-size: 22px;">Message from Dr BSK Healthcare</h2>
+            </div>
+            <div style="font-size: 15px; color: #1e293b; white-space: pre-line;">
+              ${body}
+            </div>
+            <hr style="margin-top: 30px; border: 0; border-top: 1px solid #eef2f6;">
+            <p style="color: #64748b; font-size: 12px; text-align: center; margin: 0;">This is an email sent from the administration desk of Dr BSK Healthcare.</p>
+          </div>
+        </div>
+      `,
+      text: body,
+      attachments: attachments
+    };
+
+    console.log(`Sending custom email to ${to} with ${attachments.length} attachments...`);
+    const info = await transporter.sendMail(mailOptions);
+    console.log(`✅ Custom email sent successfully: ${info.messageId}`);
+
+    // Clean up files in background
+    if (req.files && req.files.length > 0) {
+      req.files.forEach(file => {
+        fs.unlink(file.path, (err) => {
+          if (err) console.error("Error deleting file after mail send:", err);
+        });
+      });
+    }
+
+    res.json({ success: true, message: "Email sent successfully", messageId: info.messageId });
+  } catch (error) {
+    console.error("❌ Failed to send custom email:", error);
+    // Cleanup files if error occurred
+    if (req.files && req.files.length > 0) {
+      req.files.forEach(file => {
+        fs.unlink(file.path, (err) => {
+          if (err) console.error("Error deleting file after mail fail:", err);
+        });
+      });
+    }
+    res.status(500).json({ success: false, message: error.message });
+  }
+};
+
 module.exports = {
   createAdmin: [upload, handleFileSizeError, createAdmin],
   updateAdmin: [upload, handleFileSizeError, updateAdmin],
@@ -687,4 +802,6 @@ module.exports = {
   loginWithOtp,
   sendOtp,
   getAdminCount,
+  attachmentsUpload,
+  sendCustomEmail,
 };

@@ -56,15 +56,84 @@ exports.handleUploadError = (error, req, res, next) => {
   res.status(400).json({ message: error.message });
 };
 
-const parseQuantity = (quantity) => {
-  if (!quantity) return [];
-  if (Array.isArray(quantity)) return quantity;
+const reconstructStringFromObject = (obj) => {
+  if (typeof obj === 'object' && obj !== null && !Array.isArray(obj) && obj["0"] !== undefined) {
+    let s = "";
+    for (let i = 0; obj[String(i)] !== undefined; i++) {
+      s += obj[String(i)];
+    }
+    return s;
+  }
+  return null;
+};
+
+const normalizeQuantity = (raw) => {
   try {
-    const parsed = JSON.parse(quantity);
-    return Array.isArray(parsed) ? parsed : [parsed];
-  } catch {
+    if (!raw) return [];
+    
+    const reconstructedRaw = reconstructStringFromObject(raw);
+    if (reconstructedRaw !== null) {
+      raw = reconstructedRaw;
+    }
+    
+    let arr = [];
+    if (Array.isArray(raw)) {
+      if (raw.length > 0) {
+        if (Array.isArray(raw[0])) {
+          arr = raw.flat();
+        } else {
+          arr = raw;
+        }
+      }
+      
+      if (arr.length > 0 && typeof arr[0] === 'object' && arr[0] !== null && arr[0]["0"] !== undefined) {
+        arr = arr.flatMap((item) => {
+          const s = reconstructStringFromObject(item);
+          if (s !== null) {
+            try {
+              const parsed = JSON.parse(s);
+              return Array.isArray(parsed) ? parsed : [parsed];
+            } catch {
+              return [];
+            }
+          }
+          return [item];
+        });
+      }
+      
+      if (arr.length > 0 && typeof arr[0] === "string") {
+        arr = arr.flatMap((item) => {
+          try {
+            const parsed = JSON.parse(item);
+            return Array.isArray(parsed) ? parsed : [parsed];
+          } catch (err) {
+            return [];
+          }
+        });
+      }
+    } else if (typeof raw === "string") {
+      try {
+        arr = JSON.parse(raw);
+        if (Array.isArray(arr) && arr.length > 0 && Array.isArray(arr[0])) {
+          arr = arr.flat();
+        }
+      } catch {
+        arr = [];
+      }
+    } else {
+      arr = [];
+    }
+    
+    if (!Array.isArray(arr)) return [];
+    return arr;
+  } catch (err) {
+    console.error("Error normalizing quantity:", err);
     return [];
   }
+};
+
+const parseQuantity = (quantity) => {
+  return normalizeQuantity(quantity);
 };
 
 const normalizeExistingMediaUrl = (url = "") => {
